@@ -49,8 +49,12 @@ app.use(express.json());
 // check is a stand-in for wiring real auth through once this is
 // actually deployed (e.g. verifying the same Supabase JWT the orbuni
 // edge function checks, via can_manage_section("applications")).
+// A query-param fallback (?secret=...) is accepted too, same pattern
+// send-student-emails already uses — that's what lets a plain browser
+// URL hit /diagnostics for a quick manual check, not just a header a
+// script can set.
 function requireInternalAuth(req, res, next){
-  const got = req.headers["x-internal-secret"] || "";
+  const got = req.headers["x-internal-secret"] || req.query.secret || "";
   if(!process.env.INTERNAL_SHARED_SECRET || got !== process.env.INTERNAL_SHARED_SECRET){
     return res.status(401).json({ error: "not authorised" });
   }
