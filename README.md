@@ -87,6 +87,9 @@ touching a real student's live application while getting it right.
 
 ## Environment variables this service needs (set in Render, not here)
 
-- `BROWSERBASE_API_KEY`, `BROWSERBASE_PROJECT_ID` — from browserbase.com
+- `BROWSERBASE_API_KEY` — from browserbase.com (the API key alone identifies
+  the project now — Browserbase confirms no separate project id is needed)
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — same project as everything else
 - `ASKUNI_PORTAL_URL` — askuni.com's real login page URL
+- `INTERNAL_SHARED_SECRET` — a random password only the Orbuni portal and
+  this service know, so nobody else can call these endpoints

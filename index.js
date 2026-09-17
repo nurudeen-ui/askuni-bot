@@ -17,7 +17,8 @@ const PORT = env("PORT", 3000);
 const ASKUNI_PORTAL_URL = env("ASKUNI_PORTAL_URL", "https://www.askuni.com/login");
 
 const bb = new Browserbase({ apiKey: env("BROWSERBASE_API_KEY", "") });
-const BB_PROJECT_ID = env("BROWSERBASE_PROJECT_ID", "");
+// No project id needed — Browserbase resolves the project from the API
+// key alone (confirmed against their current docs, 17 Sep 2026).
 
 const sb = createClient(env("SUPABASE_URL", ""), env("SUPABASE_SERVICE_ROLE_KEY", ""));
 
@@ -61,13 +62,12 @@ app.post("/submissions", requireInternalAuth, async (req, res) => {
 
     let contextId = await getSavedContextId();
     if(!contextId){
-      const ctx = await bb.contexts.create({ projectId: BB_PROJECT_ID });
+      const ctx = await bb.contexts.create({ name: "orbuni-askuni" });
       contextId = ctx.id;
       await saveContextId(contextId);
     }
 
     const session = await bb.sessions.create({
-      projectId: BB_PROJECT_ID,
       browserSettings: { context: { id: contextId, persist: true } },
     });
     const liveView = await bb.sessions.liveUrls.create(session.id);
@@ -121,7 +121,6 @@ app.post("/check-responses", requireInternalAuth, async (_req, res) => {
     if(!contextId) return res.status(409).json({ error: "no AskUni login saved yet — do one manual submission first" });
 
     const session = await bb.sessions.create({
-      projectId: BB_PROJECT_ID,
       browserSettings: { context: { id: contextId, persist: true } },
     });
     const browser = await chromium.connectOverCDP(
