@@ -21,8 +21,11 @@ const ASKUNI_PORTAL_URL = env("ASKUNI_PORTAL_URL", "https://apply.askuni.com");
 //   01 Account Details — First Name, Last Name, Email, Gender, Mobile
 //      Phone (country-code picker, defaulted to +90 Turkey), Profile
 //      Picture (file upload) — then a "Next" button. WRITTEN BELOW.
-//   02 Student Information — still blocked, see fillAskUniApplication().
-//   03 Documents — still blocked, see fillAskUniApplication().
+//   02 Student Information — Passport Number, Birth Date, Country of
+//      Birth, Country of Residence, Nationality, City of Residence,
+//      Address, Mother Name, Father Name, Passport Date of Expire,
+//      Passport Date of Issue, Need Visa (toggle). WRITTEN BELOW.
+//   03 Documents — best-effort, see fillAskUniApplication().
 //   04 Apply (search a programme, pick it, confirm) — WRITTEN BELOW, from
 //      watching Nurudeen actually submit a real application for a real
 //      student (Usman Shehu Maisango) on 17 Sep 2026: he searched
@@ -83,9 +86,15 @@ async function saveContextId(id){
 // `profiles`, the programme/university on `programmes`/`universities`,
 // and uploaded files on `documents` (one row per file, keyed by
 // profile_id + a `kind` enum).
+// `student_details` (one row per profile_id, profile_id is its own
+// primary key — checked directly, 17 Sep 2026 night) is where most of
+// AskUni step 02's fields actually live: passport_number, date_of_birth,
+// place_of_birth, nationality, mother_name, father_name, address_line,
+// city, country, passport_expiry. Joining it here the same way
+// profiles/programmes/universities already are.
 async function loadApplication(applicationId){
   const { data: appRow, error } = await sb.from("applications")
-    .select("*, profiles(*), programmes(*, universities(*))")
+    .select("*, profiles(*, student_details(*)), programmes(*, universities(*))")
     .eq("id", applicationId).maybeSingle();
   if(error) throw error;
   if(!appRow) return null;
@@ -241,10 +250,10 @@ async function fillAskUniApplication(page, app_row){
 
   await page.goto(ASKUNI_PORTAL_URL + "/users/student/list/");
 
-  // Opening the wizard: confirmed from Nurudeen's screenshots that it's a
-  // modal titled "Add Student User" — the button that opens it wasn't
-  // itself screenshotted, so "add student" is a best-guess match on a
-  // real modal title rather than a guessed button label from nothing.
+  // Opening the wizard: confirmed for real, 17 Sep 2026 night — the
+  // button on the student list page reads exactly "ADD STUDENT USER".
+  // Kept as a case-insensitive /add student/i match rather than an exact
+  // string so it still works if AskUni ever changes the casing.
   await page.getByRole("button", { name: /add student/i }).click();
 
   // ---- 01 Account Details (confirmed) ----
@@ -264,63 +273,105 @@ async function fillAskUniApplication(page, app_row){
   }
   await page.getByRole("button", { name: "Next" }).click();
 
-  // ---- 02 Student Information / 03 Documents — STILL BLOCKED ----
-  // Nurudeen's screenshots covered the whole application end to end, but
-  // the images themselves didn't carry over into this working session —
-  // only a written description of the overall flow did, and that
-  // description doesn't include the exact field labels for these two
-  // steps. Steps 01 and 04 are confirmed enough to write for real; these
-  // two aren't, and guessing field labels here (unlike a page's general
-  // layout) is exactly the kind of mistake that silently fills in the
-  // wrong field on a real student's real application.
+  // ---- 02 Student Information (in-panel heading: "Personal Information")
+  // — confirmed for real, 17 Sep 2026 night, from Nurudeen's second
+  // screenshot batch (the one that finally caught the wizard from the
+  // very start). Real fields: Passport Number, Birth Date (clearable
+  // date picker), Country of Birth (dropdown), Country of Residence
+  // (dropdown), Nationality (dropdown), City of Residence, Address,
+  // Mother Name, Father Name, Passport Date of Expire (clearable date),
+  // Passport Date of Issue (clearable date), Need Visa (toggle switch).
   //
-  // What's actually needed to finish this — and only this, nothing more:
-  // one screenshot each of "02 Student Information" and "03 Documents"
-  // while they're mid-fill, so the field labels and upload buttons are
-  // visible. Once those two exist, delete this throw and the two
-  // TODO steps below can be written the same way step 01 was.
-  throw new Error(
-    "fillAskUniApplication() has steps 01 and 04 written, but 02 (Student " +
-    "Information) and 03 (Documents) still need their field labels — send " +
-    "one screenshot of each of those two steps, mid-fill, and this can be finished."
-  );
+  // Orbuni's own schema was checked again for real rather than guessed:
+  // a `student_details` table (one row per profile_id) carries most of
+  // these — passport_number, date_of_birth, nationality, mother_name,
+  // father_name, address_line, city, country, passport_expiry.
+  //
+  // Left unset on purpose, same reasoning as Gender/Mobile Phone above —
+  // better blank than wrong on a real student's real application:
+  //   - Country of Birth: `student_details` only has `place_of_birth`,
+  //     which was never confirmed to actually hold a country rather than
+  //     a city/town — and it's a dropdown anyway (see next point).
+  //   - Country of Residence, Nationality: these are dropdowns, and
+  //     whether AskUni's dropdown widget is a plain <select> (safe with
+  //     .selectOption()) or a custom searchable combobox (which
+  //     .selectOption() would silently fail on) was never seen in the
+  //     screenshots — same open question as the Gender dropdown in step
+  //     01, so left unset here too rather than guess.
+  //   - Passport Date of Issue: no matching column exists anywhere in
+  //     the schema yet.
+  //   - Need Visa: no matching column exists anywhere in the schema yet.
+  const details = student.student_details || {};
+  if(details.passport_number) await page.getByLabel("Passport Number").fill(details.passport_number);
+  // date_of_birth / passport_expiry come back from Supabase as plain
+  // "YYYY-MM-DD" strings. These are "clearable date picker" fields, not
+  // plain text — .fill() only works if the picker is backed by a real
+  // typeable <input>, and the exact format it expects (YYYY-MM-DD vs
+  // DD/MM/YYYY vs something else) was never confirmed in a screenshot.
+  // Best-effort like step 03's document uploads: flag this as the first
+  // thing to check if it throws, or if a real submission shows the wrong
+  // date landed.
+  if(details.date_of_birth) await page.getByLabel("Birth Date").fill(details.date_of_birth);
+  if(details.passport_expiry) await page.getByLabel("Passport Date of Expire").fill(details.passport_expiry);
+  if(details.city) await page.getByLabel("City of Residence").fill(details.city);
+  if(details.address_line) await page.getByLabel("Address").fill(details.address_line);
+  if(details.mother_name) await page.getByLabel("Mother Name").fill(details.mother_name);
+  if(details.father_name) await page.getByLabel("Father Name").fill(details.father_name);
+  await page.getByRole("button", { name: "Next" }).click();
 
-  // TODO 02 Student Information — fields unknown.
-
-  // TODO 03 Documents — AskUni's own screenshots showed "Essential
-  // Documents" / "Other Documents" tabs. Our own `documents.kind` enum
-  // (passport, passport_photo, certificate, transcript, english_test,
-  // birth_certificate, other, ...) lines up well enough with that split
-  // to guess which of our files are "essential" — but not the exact
-  // upload button/label for each one on AskUni's side, so this stays a
-  // TODO alongside 02:
-  // const essential = ["passport", "passport_photo", "certificate", "transcript", "english_test"];
-  // for(const kind of essential){
-  //   const doc = findDoc(app_row, kind);
-  //   if(doc) await page.getByLabel(/* AskUni's real label for `kind` */).setInputFiles(await downloadToTemp(doc.storage_path));
-  // }
+  // ---- 03 Documents — best-effort, confirmed via a related page rather
+  // than the wizard step itself. Nurudeen's completed student's own
+  // profile page has an "Essential Documents" tab listing exactly four
+  // upload slots: Passport, Diploma, Transcript, and a separate
+  // "Profile Picture" button — those are very likely the same four
+  // fields step 03 ("Add Documents") asks for while filling the wizard,
+  // since it's the same underlying record, but that's an inference from
+  // a different screen, not a screenshot of step 03 itself, so treat any
+  // mismatch here as the first thing to check if this throws.
+  const DOC_LABELS = { passport: "Passport", certificate: "Diploma", transcript: "Transcript" };
+  for(const [kind, label] of Object.entries(DOC_LABELS)){
+    const doc = findDoc(app_row, kind);
+    if(doc) await page.getByLabel(label).setInputFiles(await downloadToTemp(doc.storage_path));
+  }
+  await page.getByRole("button", { name: "Next" }).click();
 
   return applyToProgramme(page, app_row, student, programme, university);
 }
 
-// ---- 04 Apply (confirmed for real, 17 Sep 2026) ------------------------
+// ---- 04 Apply (confirmed for real, 17 Sep 2026, off Nurudeen's actual
+// Usman Shehu Maisango application) ---------------------------------
 async function applyToProgramme(page, app_row, student, programme, university){
-  await page.getByPlaceholder(/search/i).fill(programme.course || "");
+  // The real placeholder text is "Type Interested Program and Press
+  // Enter" — it does not contain the word "search", so a /search/i
+  // selector (the original guess) would never have matched it.
+  const searchBox = page.getByPlaceholder("Type Interested Program and Press Enter");
+  await searchBox.fill(programme.course || "");
+  await searchBox.press("Enter");
 
   // The result Nurudeen picked showed the course name, university and fee
   // together — matching on the course name is the most specific single
-  // thing we know for sure is visible in a result row.
+  // thing we know for sure is visible in a result row. Clicking it
+  // expands the row rather than applying directly — it reveals a season
+  // button (e.g. "2026 FALL (SEPTEMBER 2026)") that has to be clicked
+  // next to actually trigger the confirmation dialog.
   await page.getByText(programme.course, { exact: false }).first().click();
+  await page.getByRole("button", { name: /\b(20\d{2})\s+(FALL|SPRING|SUMMER|WINTER)\b/i }).first().click();
 
   const dialog = page.getByRole("dialog", { name: /are you sure/i });
   await dialog.waitFor({ timeout: 15000 });
   await dialog.getByRole("button", { name: "APPLY" }).click();
 
+  // "Application submit!" fires while STILL on the search/list page — the
+  // programme is only added to the "Applications (Max 4)" panel on the
+  // right at this point. The wizard isn't actually done, and the URL
+  // hasn't changed yet, until the separate "FINISH" button is clicked.
   await page.getByText("Application submit!").waitFor({ timeout: 15000 });
+  await page.getByRole("button", { name: "FINISH" }).click();
 
-  // The successful submit redirects to the student's own profile page at
-  // /users/student/<id>/applications/ — capture that id so a later
-  // response-check can go straight there instead of matching by name.
+  // Clicking FINISH is what redirects to the student's own profile page
+  // at /users/student/<id>/applications/, with an "All steps are
+  // completed!" toast — capture the id so a later response-check can go
+  // straight there instead of matching by name.
   await page.waitForURL(/\/users\/student\/\d+\/applications\/?/, { timeout: 15000 });
   const match = page.url().match(/\/users\/student\/(\d+)\//);
   const askuniStudentId = match ? match[1] : null;
