@@ -134,44 +134,80 @@ app.get("/diagnostics", requireInternalAuth, async (_req, res) => {
 // Returns a Live View URL. The portal shows this as "Click here to sign
 // in to AskUni" — staff opens it, sees AskUni's REAL login page (this
 // service never sees the password), logs in, and comes back.
-app.post("/submissions", requireInternalAuth, async (req, res) => {
+//
+// Registered for BOTH POST (what the real "Send to AskUni" button in the
+// Orbuni portal will call, once that button exists) and GET (so this can
+// be triggered right now by opening a plain URL in a browser — same
+// pattern as /diagnostics — before that portal button is built). Reading
+// `application_id` from either the query string or a JSON body covers
+// both.
+async function handleStartSubmission(req, res){
   try{
-    const { application_id } = req.body || {};
+    const application_id = req.query.application_id || (req.body && req.body.application_id);
     if(!application_id) return res.status(400).json({ error: "application_id required" });
+    console.log("[submissions/start] application_id=" + application_id);
 
     let contextId = await getSavedContextId();
     if(!contextId){
+      console.log("[submissions/start] no saved context — creating one");
       const ctx = await bb.contexts.create({ name: "orbuni-askuni" });
       contextId = ctx.id;
       await saveContextId(contextId);
+      console.log("[submissions/start] created + saved context " + contextId);
     }
 
     const session = await bb.sessions.create({
       browserSettings: { context: { id: contextId, persist: true } },
     });
-    const liveView = await bb.sessions.liveUrls.create(session.id);
+    console.log("[submissions/start] created session " + session.id);
+    // Real Browserbase SDK method, confirmed against their current docs —
+    // an earlier version of this file called a method (sessions.liveUrls.create)
+    // that does not exist on the SDK at all, which is exactly the kind of
+    // silent-until-clicked bug this comment is here to warn about happening
+    // again: always check a method against the SDK's own docs, not a
+    // remembered shape, before trusting it in code nobody has run yet.
+    const debugInfo = await bb.sessions.debug(session.id);
+    const liveViewUrl = debugInfo.debuggerFullscreenUrl;
+    console.log("[submissions/start] got live view url");
 
     // Stash which application this session is for, so /submissions/:id/continue
     // (called once staff confirms they've logged in) knows what to do next.
-    await sb.from("ai_actions").insert({
+    const logged = await sb.from("ai_actions").insert({
       section: "applications",
       action_type: "askuni_submission_started",
       proposal: { application_id, browserbase_session_id: session.id },
       summary: "Started an AskUni submission — waiting on manual login",
-      created_by: req.body.staff_id || null,
+      created_by: (req.body && req.body.staff_id) || null,
     });
+    if(logged.error) console.log("[submissions/start] ai_actions insert failed (non-fatal): " + logged.error.message);
 
-    res.json({ session_id: session.id, live_view_url: liveView.url, application_id });
+    // next_step spells out, in the response itself, exactly what to open
+    // next and with what query params — so this can be driven purely by
+    // clicking links in a browser, without reading the code.
+    const secretPart = process.env.INTERNAL_SHARED_SECRET
+      ? "&secret=" + encodeURIComponent(process.env.INTERNAL_SHARED_SECRET) : "";
+    res.json({
+      session_id: session.id,
+      live_view_url: liveViewUrl,
+      application_id,
+      next_step: "Open live_view_url first and log in to AskUni for real. THEN, once logged in, open: " +
+        req.protocol + "://" + req.get("host") + "/submissions/" + session.id + "/continue?application_id=" + application_id + secretPart,
+    });
   }catch(e){
+    console.error("[submissions/start] FAILED: " + String(e && e.stack || e));
     res.status(500).json({ error: String(e && e.message || e) });
   }
-});
+}
+app.post("/submissions", requireInternalAuth, handleStartSubmission);
+app.get("/submissions", requireInternalAuth, handleStartSubmission);
 
 // ---- step 2: staff clicks "I've logged in, continue" -------------------
-app.post("/submissions/:sessionId/continue", requireInternalAuth, async (req, res) => {
+// Same GET+POST treatment as above, for the same reason.
+async function handleContinueSubmission(req, res){
   try{
     const { sessionId } = req.params;
-    const { application_id } = req.body || {};
+    const application_id = req.query.application_id || (req.body && req.body.application_id);
+    console.log("[submissions/continue] sessionId=" + sessionId + " application_id=" + application_id);
 
     const app_row = await loadApplication(application_id);
     if(!app_row) return res.status(404).json({ error: "application not found" });
@@ -180,15 +216,20 @@ app.post("/submissions/:sessionId/continue", requireInternalAuth, async (req, re
       `wss://connect.browserbase.com?apiKey=${env("BROWSERBASE_API_KEY","")}&sessionId=${sessionId}`
     );
     const page = browser.contexts()[0].pages()[0];
+    console.log("[submissions/continue] connected to browser, filling wizard…");
 
     const result = await fillAskUniApplication(page, app_row);
     await browser.close();
+    console.log("[submissions/continue] done: " + JSON.stringify(result));
 
     res.json({ ok: true, result });
   }catch(e){
+    console.error("[submissions/continue] FAILED: " + String(e && e.stack || e));
     res.status(500).json({ error: String(e && e.message || e) });
   }
-});
+}
+app.post("/submissions/:sessionId/continue", requireInternalAuth, handleContinueSubmission);
+app.get("/submissions/:sessionId/continue", requireInternalAuth, handleContinueSubmission);
 
 // ---- the scheduled half: check askuni.com for responses ----------------
 // Point a Render Cron Job (or a periodic call from Supabase) at this.
@@ -237,6 +278,7 @@ app.post("/check-responses", requireInternalAuth, async (_req, res) => {
     }
     res.json({ ok: true, found: found.length });
   }catch(e){
+    console.error("[check-responses] FAILED: " + String(e && e.stack || e));
     res.status(500).json({ error: String(e && e.message || e) });
   }
 });

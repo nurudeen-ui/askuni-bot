@@ -1,5 +1,24 @@
 # Orbuni ⇄ AskUni bot — deployed, all four wizard steps written
 
+**First real test, 17 Sep 2026 (night): found and fixed a real bug.**
+Nurudeen clicked the real "Send to AskUni" button for the first time
+(Aisha Aman's application) and got "Edge Function returned a non-2xx
+status code." Traced it through Supabase's logs to askuni-bot itself
+returning a real 500 — and the actual cause was a genuine bug, not a
+config problem: `bb.sessions.liveUrls.create(session.id)` was never a
+real method on the Browserbase SDK (checked directly against their
+current API docs). The correct call is `bb.sessions.debug(session.id)`,
+which returns `{ debuggerFullscreenUrl, debuggerUrl, pages }` — fixed
+now. Also created a database table this code depended on but that
+never actually existed (`integration_settings`, where the reusable
+login gets saved between restarts — checked directly, it was a genuine
+404, not a permissions issue), and added real `console.log`/
+`console.error` lines through every step of `/submissions`,
+`/submissions/:id/continue`, and `/check-responses`, so if anything
+else goes wrong on the next attempt, Render's logs will show exactly
+where instead of only a generic error message reaching the browser.
+**Not yet re-tested against a real login** — that's the next click.
+
 **Status, 17 Sep 2026 (night):** this is now a real, running Render
 service, not just a skeleton. `askuni-bot` is deployed at
 `https://askuni-bot.onrender.com`, connected to Nurudeen's own Render +
@@ -52,9 +71,24 @@ Diploma / Transcript / Profile Picture) rather than a screenshot of
 step 03 itself — flag it as the first thing to check if it throws.
 
 **Nothing is genuinely blocked anymore.** The bot can attempt a real,
-end-to-end submission right now. What's below is the original
-starting-skeleton writeup, kept as-is for the parts that are still
-true (the story of why this exists).
+end-to-end submission right now.
+
+**`/submissions` and `/submissions/:sessionId/continue` now also work
+as plain browser links, not just as calls a portal button would make.**
+The real "Send to AskUni" button in the Orbuni portal itself doesn't
+exist yet, so — same idea as `/diagnostics` — Nurudeen can trigger a
+real submission today just by opening two links in order:
+1. Open `.../submissions?application_id=...&secret=...` — it starts a
+   Browserbase session and hands back a `live_view_url` (open that,
+   log in to AskUni for real, that's the one manual step) and a
+   ready-to-open `next_step` link for step 2 — no need to construct it
+   by hand.
+2. Once logged in, open that `next_step` link — it drives the actual
+   wizard fill-and-submit against the real AskUni site and returns
+   what happened as JSON.
+
+What's below is the original starting-skeleton writeup, kept as-is for
+the parts that are still true (the story of why this exists).
 
 What this is: the small always-on service that goes on Render, so that a
 **Send to AskUni** button in the Orbuni team portal can (1) submit a
