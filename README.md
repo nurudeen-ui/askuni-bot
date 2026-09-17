@@ -1,7 +1,7 @@
 # Orbuni ⇄ AskUni bot — starting skeleton
 
 What this is: the small always-on service that goes on Render, so that a
-"Send to AskUni" button in the Orbuni team portal can (1) submit a
+**Send to AskUni** button in the Orbuni team portal can (1) submit a
 completed student application into the real askuni.com on your behalf,
 and (2) later check askuni.com for a response (a university's decision,
 or a commission payment) without you lifting a finger — after you've
@@ -9,11 +9,12 @@ logged in on askuni.com **once**, live, with your own hands.
 
 ## Why it needs to exist at all
 
-Supabase's edge functions (what runs `askuni`, the Finance assistant)
-have no browser inside them — they can only call other APIs, not drive
-a real website. Netlify only serves the static site. Neither can open
-askuni.com, wait while you type your password into it, and keep that
-browser tab alive afterward. This service is that missing piece.
+Supabase's edge functions (what runs `orbuni-assistant`, the section
+assistants) have no browser inside them — they can only call other
+APIs, not drive a real website. Netlify only serves the static site.
+Neither can open askuni.com, wait while you type your password into it,
+and keep that browser tab alive afterward. This service is that missing
+piece.
 
 ## The flow, end to end
 
@@ -42,29 +43,79 @@ browser tab alive afterward. This service is that missing piece.
    anything new, and writes what it finds back into Orbuni's own
    database — a decision onto the student's application row, a
    commission amount into `finance_transactions` (same shape as a
-   manual Finance entry).
+   manual Finance entry, and now linked to the real `application_id`).
 
-## What's real vs. what's still a placeholder in this skeleton
+## What's confirmed for real (17 Sep 2026)
 
-Real and working, once deployed with real keys:
-- The Browserbase session creation + Live View URL hand-back
-  (`POST /submissions`).
-- The context-save-and-reuse plumbing (`getOrCreateContext`).
-- The Express server shape, env var loading, and the Supabase writes.
+You did a real application for a real student, Usman Shehu Maisango,
+end to end, and screenshotted the whole thing — that's what unblocked
+almost all of this:
 
-Still a placeholder — **cannot be written correctly without seeing
-askuni.com's actual submission form and response pages**:
-- `fillAskUniApplication()` — the actual field-by-field form-filling
-  and document upload. Needs real selectors (field names, upload
-  button, submit button) from the real page.
-- `readAskUniResponses()` — the actual "check for a decision or a
-  payment" logic. Needs to know what a decision and a commission
-  notice actually look like on askuni.com.
+- The portal is at `apply.askuni.com` (not `askuni.com/login`).
+- "Add a student" is a 4-step **"Add Student User"** modal, opened from
+  `apply.askuni.com/users/student/list/`: **01 Account Details** (First
+  Name, Last Name, Email, Gender, Mobile Phone with a country picker
+  defaulted to +90, Profile Picture) → **02 Student Information** →
+  **03 Documents** → **04 Apply**.
+- **04 Apply** is a programme search box, a results list, an "Are you
+  sure?" confirmation dialog (University / Program / Season, CANCEL /
+  APPLY), then an "Application submit!" toast — landing on the
+  student's own profile page at
+  `apply.askuni.com/users/student/<id>/applications/` with an "All
+  steps are completed!" toast and a new row in that page's Applications
+  table.
+- The **Commissions page** (`apply.askuni.com/application/commissions/`)
+  picks up the new commission automatically — Usman's showed as $349.60
+  at 50%, right alongside pre-existing rows, with columns Student,
+  Application Status, Giver, Taker, Commission %, Status, Amount,
+  Remaining.
 
-The honest next step on those two functions is either a short screen-
-share walkthrough of askuni.com's submission flow, or (better) a test/
-sandbox account on askuni.com to build and rehearse against without
-touching a real student's live application while getting it right.
+Steps 01 and 04 are written for real in `index.js` off the above.
+
+I also checked Orbuni's actual Supabase schema directly (rather than
+guessing column names, which the first version of this file did) — the
+real shape is: `applications` only holds `profile_id` + `programme_id`
++ `status`/`decision`; the student's own details live on `profiles`;
+the programme and university live on `programmes` → `universities`;
+uploaded files live on `documents` (one row per file, `kind` enum:
+`profile_photo`, `passport`, `passport_photo`, `certificate`,
+`transcript`, `english_test`, `birth_certificate`, `other`,
+`offer_letter`, `acceptance_letter`, `visa_document`,
+`payment_receipt`). `index.js` now joins across those for real instead
+of reading columns that don't exist. I also added two columns to
+`applications` — `askuni_student_id` and `askuni_synced_at` — so a
+submitted application remembers which real AskUni student record it
+became, instead of every later response-check having to guess by name.
+
+## What's still genuinely blocked
+
+**02 Student Information and 03 Documents.** Your screenshots covered
+the whole flow, but the images themselves didn't make it into the
+working session where this code got written — only a written summary
+of the overall flow did, and that summary doesn't include the exact
+field labels for these two specific steps (it's very solid on 01 and
+04, which is why those are the two that got written).
+
+The actual, narrow ask — nothing more than this: **one screenshot each
+of "02 Student Information" and "03 Documents," mid-fill**, same as
+you already did for the others. Once those two exist, the rest of
+`fillAskUniApplication()` writes the same way 01 did. No need to redo
+the whole walkthrough — just those two screens.
+
+Also still a guess: the exact button that opens the "Add Student User"
+modal from the student list page (not itself screenshotted), and the
+Gender dropdown's real option values / the Mobile Phone country-code
+picker's real interaction (dropdown vs. typeahead) — both left unset
+in step 01 for now rather than risk filling them in wrong.
+
+`readAskUniResponses()` (the Commissions-page reader) is written
+generically off the table's own header row rather than guessed CSS
+classes, since no "Inspect Element" view of a row was ever captured —
+that makes it robust to AskUni changing their styling, but it still
+matches a commission back to one of your applications by the
+student's name when there's no `askuni_student_id` yet (true for
+anything submitted by hand before this bot existed). Once this bot
+submits applications for real, that matching gets exact.
 
 ## What you (Nurudeen) need to do before this can run for real
 
@@ -82,14 +133,15 @@ touching a real student's live application while getting it right.
    from their dashboard and give it to me as a Render **environment
    variable** (never typed into our chat) — I'll walk you through exactly
    where to paste it once your Render account is connected.
-3. Everything else (the actual deploy, the Supabase wiring, the button
-   in your portal) I can do once those two accounts exist.
+3. Two screenshots (02 and 03, above) to finish the form-filling.
+4. Everything else (the actual deploy, the Supabase wiring, the button
+   in your portal) I can do once those exist.
 
 ## Environment variables this service needs (set in Render, not here)
 
 - `BROWSERBASE_API_KEY` — from browserbase.com (the API key alone identifies
   the project now — Browserbase confirms no separate project id is needed)
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — same project as everything else
-- `ASKUNI_PORTAL_URL` — askuni.com's real login page URL
+- `ASKUNI_PORTAL_URL` — defaults to `https://apply.askuni.com`, confirmed real
 - `INTERNAL_SHARED_SECRET` — a random password only the Orbuni portal and
   this service know, so nobody else can call these endpoints
