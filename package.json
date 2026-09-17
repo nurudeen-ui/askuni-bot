@@ -1,0 +1,17 @@
+{
+  "name": "orbuni-askuni-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runs on Render. Talks to Browserbase to submit Orbuni applications into the real AskUni portal and check for responses, using one manual login (Live View) that then stays signed in via a saved Browserbase context.",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@browserbasehq/sdk": "^2",
+    "@supabase/supabase-js": "^2",
+    "express": "^4",
+    "playwright-core": "^1"
+  }
+}
