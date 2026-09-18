@@ -275,12 +275,33 @@ async function screenshotOnFailure(page, label){
   }
 }
 
+// 18 Sep 2026 (night) bug found here: Nurudeen clicked "I'm logged in —
+// Continue" twice within 25 seconds (the button gave him no visible
+// "working…" state, so a fair click again). That fired TWO overlapping
+// handleContinueSubmission calls against the very same Browserbase
+// session — two separate Playwright connections both driving the same
+// browser tab at once. The first one's navigation genuinely timed out,
+// its catch block closed the browser (correct — CDP browser.close() ends
+// the whole remote session), and the second one — still mid-navigation
+// on the now-dead session — failed right after with "Target page,
+// context or browser has been closed". That's also exactly what the
+// live-view tab showed him: "Debugging connection was closed." This set
+// tracks which sessionIds already have a continue in flight, so a
+// second click on the same session is rejected immediately with a clear
+// message instead of racing the first one.
+const continuesInFlight = new Set();
+
 // ---- step 2: staff clicks "I've logged in, continue" -------------------
 // Same GET+POST treatment as above, for the same reason.
 async function handleContinueSubmission(req, res){
   let browser = null;
+  const { sessionId } = req.params;
+  if(continuesInFlight.has(sessionId)){
+    console.log("[submissions/continue] rejected duplicate call for sessionId=" + sessionId + " — one is already running");
+    return res.status(409).json({ error: "Already submitting this application — give it a minute rather than clicking Continue again." });
+  }
+  continuesInFlight.add(sessionId);
   try{
-    const { sessionId } = req.params;
     const application_id = req.query.application_id || (req.body && req.body.application_id);
     console.log("[submissions/continue] sessionId=" + sessionId + " application_id=" + application_id);
 
@@ -318,6 +339,8 @@ async function handleContinueSubmission(req, res){
     if(browser){ try{ await browser.close(); }catch{} }
     console.error("[submissions/continue] FAILED: " + String(e && e.stack || e));
     res.status(500).json({ error: String(e && e.message || e) });
+  }finally{
+    continuesInFlight.delete(sessionId);
   }
 }
 app.post("/submissions/:sessionId/continue", requireInternalAuth, handleContinueSubmission);
@@ -382,19 +405,24 @@ async function fillAskUniApplication(page, app_row){
   const programme = app_row.programmes || {};
   const university = programme.universities || {};
 
-  // 18 Sep 2026 fix: this used to be a plain `page.goto(url)`, which by
-  // default only waits for the browser's own "load" event — the URL and
-  // the page's own HTML/scripts, not whatever that page then fetches and
-  // renders client-side. AskUni's student list is exactly that kind of
-  // page (it has to fetch the real list before it can show the "ADD
-  // STUDENT USER" button), so `goto()` was returning before the button
-  // existed at all, and the very next line's click then had to wait out
-  // its own timeout with nothing there yet to find — confirmed 18 Sep
-  // 2026 from a real timed-out first attempt. `networkidle` waits until
-  // that fetching has actually quieted down before moving on.
+  // 18 Sep 2026, second fix: the FIRST fix here (below) tried `networkidle`
+  // to fix a too-early click on a still-loading page — but the very next
+  // real attempt timed out at a full 60 seconds waiting for `networkidle`,
+  // which never came at all. That's a known trap with `networkidle`: it
+  // waits for NO network activity for 500ms, and a real logged-in
+  // dashboard like AskUni's almost always has something running forever in
+  // the background — a chat widget polling, an analytics beacon, a
+  // websocket — so the page can be fully usable and still never go idle.
+  // The actual fix is simpler than either previous attempt: don't wait for
+  // the page to "settle" at all. `domcontentloaded` just confirms the HTML
+  // itself has arrived, and the very next line's `.getByRole(...).click()`
+  // ALREADY auto-waits (up to page.setDefaultTimeout, 60s) for that button
+  // to actually exist and be clickable — Playwright does this on every
+  // action by default. That auto-wait is what should have been carrying
+  // this the whole time, not a navigation-level wait.
   console.log("[fillAskUniApplication] navigating to student list…");
-  await page.goto(ASKUNI_PORTAL_URL + "/users/student/list/", { waitUntil: "networkidle", timeout: 60000 });
-  console.log("[fillAskUniApplication] list page settled, opening Add Student…");
+  await page.goto(ASKUNI_PORTAL_URL + "/users/student/list/", { waitUntil: "domcontentloaded", timeout: 30000 });
+  console.log("[fillAskUniApplication] list page loaded, waiting for Add Student to be clickable…");
 
   // Opening the wizard: confirmed for real, 17 Sep 2026 night — the
   // button on the student list page reads exactly "ADD STUDENT USER".
