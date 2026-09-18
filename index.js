@@ -70,11 +70,21 @@ function requireInternalAuth(req, res, next){
 // its id in Supabase so a restart of this service doesn't lose it and
 // force a re-login.
 async function getSavedContextId(){
-  const { data } = await sb.from("integration_settings").select("value").eq("key", "askuni_context_id").maybeSingle();
+  const { data, error } = await sb.from("integration_settings").select("value").eq("key", "askuni_context_id").maybeSingle();
+  if(error) throw new Error("couldn't read the saved AskUni login from Supabase: " + error.message);
   return data?.value || null;
 }
 async function saveContextId(id){
-  await sb.from("integration_settings").upsert({ key: "askuni_context_id", value: id });
+  // 17 Sep 2026 bug found here: this used to await the upsert without ever
+  // checking its `error` — so the very first time this ran, before the
+  // `integration_settings` table existed, the save silently did nothing
+  // (no throw, no log) while a real Browserbase context had already been
+  // created. Every attempt after that tried to create ANOTHER context
+  // under the same fixed name and got a real 409 "already exists" from
+  // Browserbase — the actual cause of the second live-test failure. Now
+  // this throws loudly instead of failing silently.
+  const { error } = await sb.from("integration_settings").upsert({ key: "askuni_context_id", value: id });
+  if(error) throw new Error("couldn't save the AskUni login (context " + id + ") to Supabase: " + error.message);
 }
 
 // ---- loading one Orbuni application with everything the wizard needs ---
@@ -150,7 +160,18 @@ async function handleStartSubmission(req, res){
     let contextId = await getSavedContextId();
     if(!contextId){
       console.log("[submissions/start] no saved context — creating one");
-      const ctx = await bb.contexts.create({ name: "orbuni-askuni" });
+      // No `name` here on purpose (17 Sep 2026 fix): Browserbase context
+      // names must be unique per project, and an earlier attempt — from
+      // before `integration_settings` existed, when the save silently
+      // failed (see saveContextId above) — already created one real
+      // context named "orbuni-askuni" in Browserbase that this service
+      // has no id for. Every retry that reused that same fixed name hit a
+      // real 409 "already exists" from Browserbase, which is exactly what
+      // Nurudeen's second live test hit. A name was only ever cosmetic —
+      // the login this context holds is found again by its id, saved
+      // right below — so leaving it unnamed makes this create call safe
+      // to retry forever.
+      const ctx = await bb.contexts.create({});
       contextId = ctx.id;
       await saveContextId(contextId);
       console.log("[submissions/start] created + saved context " + contextId);

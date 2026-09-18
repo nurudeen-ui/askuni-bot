@@ -1,5 +1,30 @@
 # Orbuni ⇄ AskUni bot — deployed, all four wizard steps written
 
+**Second real test, 17 Sep 2026 (night): found and fixed a second real
+bug — same error message, different cause.** After the first fix below
+went live, Nurudeen clicked "Send to AskUni" again and got the exact
+same "Edge Function returned a non-2xx status code" toast. That was
+worrying on its face — looked like the fix hadn't worked — but Render's
+own logs (now readable thanks to the logging the first fix added)
+showed a completely different, very specific error this time:
+`409 A context with this name already exists in the project`. Real
+cause: this code always tried to create a Browserbase context (its
+word for a saved AskUni login) under the same fixed name,
+`"orbuni-askuni"`. The very first attempt, before `integration_settings`
+even existed as a table, DID create that context in Browserbase — but
+saving its id back to Supabase failed with a 404 that the code never
+checked for and silently swallowed. So Browserbase ended up holding a
+real context named `orbuni-askuni` that this service had no record of,
+and every attempt since kept trying to create ANOTHER one under that
+same name, which Browserbase correctly refuses (names must be unique
+per project). Two real fixes: the context is no longer created with a
+fixed name at all (a name was only ever cosmetic — the login is found
+again by its id, which is what actually gets saved and reused), and
+both places that save/read that id now throw a real, visible error
+instead of silently doing nothing if the save fails — so a bug like
+this can never hide behind a generic error again. **Not yet re-tested
+against a real login** — that's the next click.
+
 **First real test, 17 Sep 2026 (night): found and fixed a real bug.**
 Nurudeen clicked the real "Send to AskUni" button for the first time
 (Aisha Aman's application) and got "Edge Function returned a non-2xx
@@ -17,7 +42,6 @@ login gets saved between restarts — checked directly, it was a genuine
 `/submissions/:id/continue`, and `/check-responses`, so if anything
 else goes wrong on the next attempt, Render's logs will show exactly
 where instead of only a generic error message reaching the browser.
-**Not yet re-tested against a real login** — that's the next click.
 
 **Status, 17 Sep 2026 (night):** this is now a real, running Render
 service, not just a skeleton. `askuni-bot` is deployed at
