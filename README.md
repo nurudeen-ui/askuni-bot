@@ -1,5 +1,38 @@
 # Orbuni ⇄ AskUni bot — deployed, all four wizard steps written
 
+**UX fix, 18 Sep 2026 (night) — "Send to AskUni" no longer opens a separate tab at all.** Nurudeen raised a real usability problem, separate from the Passport Number bug above: every "Send to AskUni" click opened AskUni's real login page in a brand-new browser tab, and on his phone he had no reliable way back to the Orbuni tab he'd come from. The right fix wasn't a better way to switch between two tabs — it was not needing a second tab in the first place. `/submissions` now hands back BOTH of Browserbase's live-view URLs: `debuggerFullscreenUrl` (meant to open as its own page) and `debuggerUrl` (meant to be embedded in an `<iframe>` on someone else's page). The frontend now renders the real AskUni login screen directly inside the same "Send to AskUni" card, in an embedded frame — Nurudeen logs in right there and presses Continue on the same screen, with nowhere else to navigate to and nothing to find his way back from. A plain "open in a new tab instead" link stays underneath as a fallback in case the embed doesn't render for some reason. This sandbox can't reach Browserbase's own domain to confirm the embed actually renders — that's what the next real attempt proves.
+
+**Eighth real test, 18 Sep 2026 (night): step 01 fully cleared — new
+failure was Passport Number on step 02, same family of bug as Email but
+with no second candidate to point to. Fixed with a general "smart fill"
+helper instead of another single guessed selector.** With the seventh
+fix (photo bucket) live, Nurudeen tried again. Real progress: first
+name, last name, email, and profile photo all went in fine — step 01
+fully worked for the first time ever. It failed moving into step 02 on
+`getByLabel('Passport Number')`: Playwright found exactly ONE matching
+element (`id=":r3:"`), but reported it "is not visible" for the full
+60-second timeout before giving up. This is the same underlying problem
+as the Email bug (AskUni's real page has a hidden, invisible field
+sharing a label with the real one) — but a harder version of it: the
+Email error's call log had a SECOND candidate to point straight at as
+the real field; here there's only the one, and it's the wrong one, so
+there's nothing in the error itself to redirect to. Asked Nurudeen for a
+screenshot of the real Student Information step to identify the correct
+field precisely, the same way the Email fix was confirmed — he wasn't
+able to send one just then. Rather than wait on that screenshot for this
+field alone (and risk hitting the identical problem again, one at a
+time, on any of the many other step 02-04 fields never yet tested —
+Birth Date, Passport Date of Expire, City of Residence, Address, Mother
+Name, Father Name), added a general `smartFill()` helper: it tries every
+element `getByLabel` finds for a field and fills the first one that's
+actually visible, and if none are visible, falls back to finding the
+field's label text on the page and filling the nearest real input that
+follows it. Every step-02 text field now goes through this helper
+instead of a plain `.getByLabel(...).fill(...)`. This is a hedge against
+the same pattern recurring, not a confirmed fix the way Email's was —
+**the next real test's logs are still what actually proves whether
+Passport Number (and the other untested fields) now go in correctly.**
+
 **Seventh real test, 18 Sep 2026 (night): the Email fix held — new
 failure was a wrong Storage bucket, not askuni.com at all.** With the
 sixth fix live, Nurudeen tried twice more. Both times the Email bug was

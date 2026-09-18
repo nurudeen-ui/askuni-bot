@@ -188,8 +188,24 @@ async function handleStartSubmission(req, res){
     // again: always check a method against the SDK's own docs, not a
     // remembered shape, before trusting it in code nobody has run yet.
     const debugInfo = await bb.sessions.debug(session.id);
+    // 18 Sep 2026, ninth real test: Nurudeen's real complaint was that
+    // clicking "Send to AskUni" took him to a whole separate browser tab
+    // to log in, and on his phone he had no reliable way back to the
+    // Orbuni tab he came from. `debuggerFullscreenUrl` is meant to be
+    // opened as its own standalone page (a new tab) — that's the ONLY
+    // url this endpoint ever returned before. Browserbase's SDK also
+    // hands back `debuggerUrl`, which is the one meant to be embedded in
+    // an <iframe> on someone else's page — returning both lets the
+    // frontend show the real login screen inline, inside the same
+    // Orbuni card, instead of sending anyone to a different tab at all.
+    // `live_view_url` (fullscreen) is kept as a fallback link in case the
+    // embed doesn't render for some reason — this sandbox can't reach
+    // Browserbase's own domain to confirm the iframe actually renders, so
+    // treat that fallback as load-bearing, not decorative, until a real
+    // test confirms the embed works.
     const liveViewUrl = debugInfo.debuggerFullscreenUrl;
-    console.log("[submissions/start] got live view url");
+    const liveViewEmbedUrl = debugInfo.debuggerUrl || liveViewUrl;
+    console.log("[submissions/start] got live view url (embeddable: " + (debugInfo.debuggerUrl ? "yes" : "no, falling back to fullscreen") + ")");
 
     // 18 Sep 2026 bug found here: a brand-new Browserbase session opens on
     // a completely blank page — nothing about this code ever sent it
@@ -238,8 +254,9 @@ async function handleStartSubmission(req, res){
     res.json({
       session_id: session.id,
       live_view_url: liveViewUrl,
+      live_view_embed_url: liveViewEmbedUrl,
       application_id,
-      next_step: "Open live_view_url first and log in to AskUni for real. THEN, once logged in, open: " +
+      next_step: "Open live_view_embed_url in an iframe (or live_view_url in a new tab if the embed fails) and log in to AskUni for real. THEN, once logged in, open: " +
         req.protocol + "://" + req.get("host") + "/submissions/" + session.id + "/continue?application_id=" + application_id + secretPart,
     });
   }catch(e){
@@ -400,6 +417,62 @@ app.post("/check-responses", requireInternalAuth, async (_req, res) => {
 
 // ================= THE FUNCTIONS THAT NEED ASKUNI'S REAL PAGE ===========
 
+// 18 Sep 2026, eighth real test (Passport Number): AskUni's page has now
+// shown TWO different flavors of the same underlying problem — invisible
+// duplicate inputs that share a label with the real, fillable field.
+//   - Email (sixth test): getByLabel found TWO candidates. The error's own
+//     call log listed both, so the real one could be picked by its actual
+//     id (#eMail) — a confirmed fix, not a guess.
+//   - Passport Number (eighth test): getByLabel found only ONE candidate,
+//     and Playwright reported THAT ONE as "not visible" for the full 60s
+//     timeout. There's no second candidate to fall back to from the error
+//     alone — the real field's selector is simply unknown from this
+//     evidence.
+// Rather than waiting for a screenshot of every one of the many still-
+// untested fields in steps 02-04 and hand-fixing each with a guessed or
+// confirmed id one at a time, this helper does what a sighted person would
+// do: try every element getByLabel matches and use the first one that's
+// actually visible; if none are visible, find the label's own text on the
+// page and fill the nearest real input that follows it. This is a
+// deliberate hedge against the SAME pattern recurring, not a claim that it
+// fixes Passport Number specifically — if it still can't find a visible
+// field, it logs that plainly and leaves the value blank (same "better
+// blank than wrong" rule used everywhere else in this file) rather than
+// filling the wrong hidden input.
+async function smartFill(page, label, value, opts = {}){
+  if(!value) return { filled: false, reason: "no value" };
+  const timeout = opts.timeout || 8000;
+
+  const candidates = await page.getByLabel(label, { exact: opts.exact || false }).all();
+  for(const el of candidates){
+    try{
+      if(await el.isVisible()){
+        await el.fill(value, { timeout });
+        console.log(`[smartFill] "${label}": filled via getByLabel (${candidates.length} candidate(s) checked)`);
+        return { filled: true, method: "getByLabel" };
+      }
+    }catch(e){ /* try the next candidate */ }
+  }
+
+  // No visible getByLabel match (Passport Number's exact failure mode) —
+  // fall back to the label's own visible text on the page, then the
+  // nearest real <input>/<textarea> that follows it in the DOM.
+  try{
+    const labelNode = page.getByText(label, { exact: false }).first();
+    const nearInput = labelNode.locator(
+      "xpath=following::input[not(@type='hidden')][1] | following::textarea[1]"
+    ).first();
+    if(await nearInput.count() && await nearInput.isVisible()){
+      await nearInput.fill(value, { timeout });
+      console.log(`[smartFill] "${label}": filled via text-proximity fallback (0 visible getByLabel candidates)`);
+      return { filled: true, method: "text-proximity" };
+    }
+  }catch(e){ /* fall through to the blank-not-wrong log below */ }
+
+  console.warn(`[smartFill] "${label}": no visible field found (${candidates.length} getByLabel candidate(s), all hidden, no text-proximity match either) — left blank rather than filling the wrong input`);
+  return { filled: false, reason: "no visible field found" };
+}
+
 async function fillAskUniApplication(page, app_row){
   const student = app_row.profiles || {};
   const programme = app_row.programmes || {};
@@ -499,7 +572,18 @@ async function fillAskUniApplication(page, app_row){
   //     the schema yet.
   //   - Need Visa: no matching column exists anywhere in the schema yet.
   const details = student.student_details || {};
-  if(details.passport_number) await page.getByLabel("Passport Number").fill(details.passport_number);
+  // 18 Sep 2026, eighth real test: switched every step-02 text field over
+  // to smartFill() (defined above `fillAskUniApplication`) after Passport
+  // Number failed with "element is not visible" for the full 60s timeout —
+  // the same hidden-duplicate-field pattern as the Email bug, but this
+  // time with no second candidate in the error log to disambiguate
+  // against. smartFill tries every getByLabel match and uses the first
+  // one that's actually visible, then falls back to the label's own text
+  // position on the page if none are. This doesn't guarantee Passport
+  // Number specifically now works — it's the best evidence-based hedge
+  // available without a screenshot of the real form — so the next real
+  // test's logs are still the thing to check.
+  if(details.passport_number) await smartFill(page, "Passport Number", details.passport_number);
   // date_of_birth / passport_expiry come back from Supabase as plain
   // "YYYY-MM-DD" strings. These are "clearable date picker" fields, not
   // plain text — .fill() only works if the picker is backed by a real
@@ -508,12 +592,12 @@ async function fillAskUniApplication(page, app_row){
   // Best-effort like step 03's document uploads: flag this as the first
   // thing to check if it throws, or if a real submission shows the wrong
   // date landed.
-  if(details.date_of_birth) await page.getByLabel("Birth Date").fill(details.date_of_birth);
-  if(details.passport_expiry) await page.getByLabel("Passport Date of Expire").fill(details.passport_expiry);
-  if(details.city) await page.getByLabel("City of Residence").fill(details.city);
-  if(details.address_line) await page.getByLabel("Address").fill(details.address_line);
-  if(details.mother_name) await page.getByLabel("Mother Name").fill(details.mother_name);
-  if(details.father_name) await page.getByLabel("Father Name").fill(details.father_name);
+  if(details.date_of_birth) await smartFill(page, "Birth Date", details.date_of_birth);
+  if(details.passport_expiry) await smartFill(page, "Passport Date of Expire", details.passport_expiry);
+  if(details.city) await smartFill(page, "City of Residence", details.city);
+  if(details.address_line) await smartFill(page, "Address", details.address_line);
+  if(details.mother_name) await smartFill(page, "Mother Name", details.mother_name);
+  if(details.father_name) await smartFill(page, "Father Name", details.father_name);
   await page.getByRole("button", { name: "Next" }).click();
 
   // ---- 03 Documents — best-effort, confirmed via a related page rather
