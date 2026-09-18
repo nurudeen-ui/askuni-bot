@@ -222,9 +222,35 @@ async function handleStartSubmission(req, res){
 app.post("/submissions", requireInternalAuth, handleStartSubmission);
 app.get("/submissions", requireInternalAuth, handleStartSubmission);
 
+// 18 Sep 2026: this real live test — the first to get past login at all —
+// timed out 30s into the very first click ("ADD STUDENT USER"), with no
+// way to see what the real page actually looked like at that moment
+// (Browserbase's live view only helps while someone is watching it live;
+// this ran unattended after Nurudeen clicked Continue and closed the tab).
+// From now on, ANY failure inside fillAskUniApplication() takes a real
+// screenshot of whatever askuni.com was showing at the moment it broke,
+// uploads it to the same "chat" Storage bucket Orbuni's own attachments
+// already use (service-role key, so no new bucket/policy needed), and
+// puts a signed link to it right in the error — so the next failure comes
+// with a picture of the real page instead of another guessing round.
+async function screenshotOnFailure(page, label){
+  try{
+    const buf = await page.screenshot({ fullPage: true });
+    const path = "askuni-debug/" + Date.now() + "-" + label.replace(/[^a-z0-9]+/gi, "-") + ".png";
+    const up = await sb.storage.from("chat").upload(path, buf, { contentType: "image/png" });
+    if(up.error){ console.error("[screenshotOnFailure] upload failed: " + up.error.message); return null; }
+    const signed = await sb.storage.from("chat").createSignedUrl(path, 60 * 60 * 24 * 7);
+    return signed.data ? signed.data.signedUrl : null;
+  }catch(e){
+    console.error("[screenshotOnFailure] itself failed: " + String(e && e.message || e));
+    return null;
+  }
+}
+
 // ---- step 2: staff clicks "I've logged in, continue" -------------------
 // Same GET+POST treatment as above, for the same reason.
 async function handleContinueSubmission(req, res){
+  let browser = null;
   try{
     const { sessionId } = req.params;
     const application_id = req.query.application_id || (req.body && req.body.application_id);
@@ -233,18 +259,35 @@ async function handleContinueSubmission(req, res){
     const app_row = await loadApplication(application_id);
     if(!app_row) return res.status(404).json({ error: "application not found" });
 
-    const browser = await chromium.connectOverCDP(
+    browser = await chromium.connectOverCDP(
       `wss://connect.browserbase.com?apiKey=${env("BROWSERBASE_API_KEY","")}&sessionId=${sessionId}`
     );
     const page = browser.contexts()[0].pages()[0];
+    // 18 Sep 2026: the first real click after this session's login timed
+    // out 30 seconds into the very first step, with the call log showing
+    // AskUni's list page was still settling (a client-rendered page, not
+    // a plain server-rendered one — the URL can finish loading well
+    // before the actual content/buttons appear). Playwright's default
+    // per-action timeout was only 30s; a cold Browserbase browser + a
+    // real remote site's own load time can genuinely take longer than
+    // that on the very first page after logging in. Raised to 60s for
+    // every action in this flow, not just the first one.
+    page.setDefaultTimeout(60000);
     console.log("[submissions/continue] connected to browser, filling wizard…");
 
-    const result = await fillAskUniApplication(page, app_row);
+    let result;
+    try{
+      result = await fillAskUniApplication(page, app_row);
+    }catch(fillErr){
+      const shotUrl = await screenshotOnFailure(page, "continue-" + sessionId);
+      throw new Error(String(fillErr && fillErr.message || fillErr) + (shotUrl ? " — screenshot: " + shotUrl : " — (couldn't capture a screenshot either)"));
+    }
     await browser.close();
     console.log("[submissions/continue] done: " + JSON.stringify(result));
 
     res.json({ ok: true, result });
   }catch(e){
+    if(browser){ try{ await browser.close(); }catch{} }
     console.error("[submissions/continue] FAILED: " + String(e && e.stack || e));
     res.status(500).json({ error: String(e && e.message || e) });
   }
@@ -311,13 +354,26 @@ async function fillAskUniApplication(page, app_row){
   const programme = app_row.programmes || {};
   const university = programme.universities || {};
 
-  await page.goto(ASKUNI_PORTAL_URL + "/users/student/list/");
+  // 18 Sep 2026 fix: this used to be a plain `page.goto(url)`, which by
+  // default only waits for the browser's own "load" event — the URL and
+  // the page's own HTML/scripts, not whatever that page then fetches and
+  // renders client-side. AskUni's student list is exactly that kind of
+  // page (it has to fetch the real list before it can show the "ADD
+  // STUDENT USER" button), so `goto()` was returning before the button
+  // existed at all, and the very next line's click then had to wait out
+  // its own timeout with nothing there yet to find — confirmed 18 Sep
+  // 2026 from a real timed-out first attempt. `networkidle` waits until
+  // that fetching has actually quieted down before moving on.
+  console.log("[fillAskUniApplication] navigating to student list…");
+  await page.goto(ASKUNI_PORTAL_URL + "/users/student/list/", { waitUntil: "networkidle", timeout: 60000 });
+  console.log("[fillAskUniApplication] list page settled, opening Add Student…");
 
   // Opening the wizard: confirmed for real, 17 Sep 2026 night — the
   // button on the student list page reads exactly "ADD STUDENT USER".
   // Kept as a case-insensitive /add student/i match rather than an exact
   // string so it still works if AskUni ever changes the casing.
   await page.getByRole("button", { name: /add student/i }).click();
+  console.log("[fillAskUniApplication] Add Student clicked, filling step 01…");
 
   // ---- 01 Account Details (confirmed) ----
   await page.getByLabel("First Name").fill(student.first_name || "");

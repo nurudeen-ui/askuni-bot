@@ -1,5 +1,32 @@
 # Orbuni ⇄ AskUni bot — deployed, all four wizard steps written
 
+**Third real test, 18 Sep 2026: past login for the first time — a new,
+different failure, further into the flow than either bug before it.**
+With both fixes above live, Nurudeen tried again — and for the first
+time, the login itself worked and the flow actually got INTO the real
+askuni.com wizard, further than any previous attempt. It then timed out
+30 seconds into the very first click, "ADD STUDENT USER" on the student
+list page. Real cause, read straight from Playwright's own error/call
+log Nurudeen sent a photo of: the code navigated to that page with a
+plain `page.goto(url)`, which only waits for the browser's "load" event
+— not for whatever the page then fetches and renders client-side.
+AskUni's list page has to load the real student list before it can show
+its own "ADD STUDENT USER" button, so the click was trying to find a
+button that might not have existed on the page yet, and 30 seconds
+wasn't always long enough for a cold browser hitting a real remote site
+for the first time after login. Fixed two ways: that navigation now
+waits for `networkidle` (the page's own background loading to actually
+finish) instead of just the browser's load event, and every action in
+this flow now gets 60 seconds instead of 30 to find what it's looking
+for. Also added: if ANY step in the whole wizard fails from now on, the
+bot takes a real screenshot of whatever askuni.com was showing at that
+exact moment and includes a link to it right in the error — so if this
+happens again, or something else does, there's a picture of the real
+page instead of another round of screenshotting Nurudeen's own screen.
+This is a principled, evidence-based fix (this environment still can't
+reach askuni.com directly to test it), but it's genuinely new territory
+— the first two attempts never even got this far. **Not yet re-tested.**
+
 **Second real test, 17 Sep 2026 (night): found and fixed a second real
 bug — same error message, different cause.** After the first fix below
 went live, Nurudeen clicked "Send to AskUni" again and got the exact
