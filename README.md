@@ -1,5 +1,71 @@
 # Orbuni ⇄ AskUni bot — deployed, all four wizard steps written
 
+**Sixth real test, 18 Sep 2026 (night): furthest yet — both fifth-test
+fixes confirmed working, and one brand-new bug on step 01 itself.**
+With the fifth fix's two bugs (the page-load hang and the double-click
+race) now deployed, Nurudeen tried again. Render's logs show this
+attempt is real progress, not another repeat: no hang, no double-click
+crash. It navigated to the student list, found and clicked "ADD STUDENT
+USER," and started actually typing into the real form — first name,
+last name — before hitting a NEW, different error: `strict mode
+violation: getByLabel('Email') resolved to 2 elements`. That means
+AskUni's real "Add Student User" form has two different inputs that
+Playwright's `getByLabel("Email")` can both match — one at
+`id=":r2:"` (almost certainly some other control on the page that just
+happens to also carry an accessible name of "Email"), and one at
+`id="eMail"` with `placeholder="example@gmail.com"` — the real field.
+Playwright refuses to guess between two matches and stopped there
+rather than risk typing into the wrong one. Fixed by pointing the code
+directly at the confirmed real id (`#eMail`) instead of the ambiguous
+label — this isn't a guess, it's the exact id AskUni's own page
+reported in the error. **This is the furthest any attempt has ever
+gotten — past login, past the student list, into the actual new-student
+form and typing real values — not yet re-tested since this fix.**
+
+**Fifth real test, 18 Sep 2026 (night): confirmed real — logged in for
+real, filled the wizard, and two genuine new bugs found.** With the
+fourth fix live, Nurudeen tried again: the tab opened already on
+AskUni's real login page, he logged in for real via AskUni's own
+"Partner" flow, saw his real dashboard, came back and clicked "I'm
+logged in — Continue." He reported "nothing happened" and later saw
+Browserbase's live-view tab say "Debugging connection was closed."
+Render's own logs show exactly what happened, and it is real
+activity, not nothing: the bot connected to his live, logged-in
+session and started filling the wizard. Two real bugs, both fixed:
+
+1. **The page never finished loading by the definition the code was
+   using.** The third fix (above) made the student-list navigation wait
+   for `networkidle` — no network activity for half a second — but a
+   real logged-in AskUni dashboard almost certainly has something
+   always running in the background (a chat widget, analytics, a
+   websocket), so it can be fully usable and still never go network-idle
+   at all. The navigation waited the full 60 seconds and gave up. Fixed
+   by dropping the `networkidle` wait entirely: the code now just
+   confirms the HTML has arrived (`domcontentloaded`) and lets the very
+   next line's button-click do what it already does automatically —
+   keep retrying for up to 60 seconds until that specific button exists
+   and is clickable. That auto-wait was always there; it just needed to
+   be the thing actually relied on.
+2. **Because the card gave no visible "working" state, a second click
+   on Continue felt reasonable — and it silently launched a SECOND
+   automation on the very same AskUni session while the first was still
+   running.** The first one's failure correctly closed the browser
+   session to clean up — but on a live AskUni session, closing it ends
+   the whole remote browser, which is exactly what killed the second
+   one mid-navigation and is what showed up as "Debugging connection was
+   closed" in the live-view tab Nurudeen had open. Fixed two ways: the
+   bot now refuses a second Continue call for a session that already has
+   one running, and the Orbuni site itself swaps the card to a plain
+   "Sending to AskUni… this can take a minute" state with no buttons at
+   all the instant Continue is pressed, so there's nothing left to
+   click twice.
+
+**Not yet re-tested since these two fixes** — but this attempt is genuine
+proof the bot is real and working end to end up to this point: it held
+Nurudeen's real login, opened the real dashboard, and started filling in
+the real wizard. The failure was a timing/double-click bug, not "the bot
+doesn't exist."
+
 **Fourth real test, 18 Sep 2026: the real explanation for "nothing
 happens" — the login tab was opening completely blank the whole time.**
 After the third fix went out, Nurudeen tried again and described (and

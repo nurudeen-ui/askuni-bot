@@ -434,7 +434,19 @@ async function fillAskUniApplication(page, app_row){
   // ---- 01 Account Details (confirmed) ----
   await page.getByLabel("First Name").fill(student.first_name || "");
   await page.getByLabel("Last Name").fill(student.last_name || "");
-  await page.getByLabel("Email").fill(student.email || "");
+  // 18 Sep 2026, sixth real test: `getByLabel("Email")` threw a Playwright
+  // strict-mode error here — it matched TWO elements on the real page, not
+  // one. Read directly from that error's own call log (not guessed):
+  //   1) <input id=":r2:" ...> inside [id="__next"] — a React/MUI
+  //      auto-generated id, almost certainly some other control on the
+  //      page (e.g. an existing-student search box) that happens to also
+  //      expose an accessible name of "Email".
+  //   2) <input id="eMail" placeholder="example@gmail.com" ...> — this is
+  //      the real new-student email field in the Add Student form.
+  // Targeting the confirmed real id directly (`#eMail`) is unambiguous and
+  // is not a guess — it's the exact id AskUni's own page reported for the
+  // right field in that error's call log.
+  await page.locator("#eMail").fill(student.email || "");
   // Gender is a dropdown — real option values not yet seen, so this is
   // left unset for now rather than guessing wrong ones:
   // await page.getByLabel("Gender").selectOption(...);
