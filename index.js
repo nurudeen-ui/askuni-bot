@@ -456,7 +456,17 @@ async function fillAskUniApplication(page, app_row){
   // await page.getByLabel("Mobile Phone").fill(student.phone || "");
   const profilePhoto = findDoc(app_row, "profile_photo");
   if(profilePhoto){
-    await page.getByLabel("Profile Picture").setInputFiles(await downloadToTemp(profilePhoto.storage_path));
+    // 18 Sep 2026, seventh real test: this threw a real "Object not found"
+    // error — but not from askuni.com or the screenshot upload (both of
+    // those were red herrings the error message made it look like at
+    // first). Checked directly against the real storage.objects table:
+    // every OTHER document kind (passport, transcript, certificate,
+    // birth_certificate) really does live in the "documents" bucket, but
+    // a profile photo is saved to the separate "avatars" bucket instead —
+    // Orbuni's own upload flow for a student's photo has always kept it
+    // there. `downloadToTemp` was hardcoded to "documents" for every kind,
+    // so this was the one document that could never actually be found.
+    await page.getByLabel("Profile Picture").setInputFiles(await downloadToTemp(profilePhoto.storage_path, "avatars"));
   }
   await page.getByRole("button", { name: "Next" }).click();
 
@@ -573,11 +583,14 @@ async function applyToProgramme(page, app_row, student, programme, university){
   return { askuni_student_id: askuniStudentId, university: university.name, course: programme.course };
 }
 
-async function downloadToTemp(storagePath){
+async function downloadToTemp(storagePath, bucket = "documents"){
   // documents.storage_path is a Supabase Storage path, not a local file —
   // Playwright's setInputFiles needs a real file on disk, so pull it down
-  // to a throwaway path first.
-  const { data, error } = await sb.storage.from("documents").download(storagePath);
+  // to a throwaway path first. `bucket` defaults to "documents" (where
+  // passport/transcript/certificate/birth_certificate really live) but a
+  // profile photo lives in the separate "avatars" bucket — see the call
+  // site above.
+  const { data, error } = await sb.storage.from(bucket).download(storagePath);
   if(error) throw error;
   const fs = await import("node:fs/promises");
   const os = await import("node:os");

@@ -1,5 +1,29 @@
 # Orbuni ⇄ AskUni bot — deployed, all four wizard steps written
 
+**Seventh real test, 18 Sep 2026 (night): the Email fix held — new
+failure was a wrong Storage bucket, not askuni.com at all.** With the
+sixth fix live, Nurudeen tried twice more. Both times the Email bug was
+genuinely gone — no repeat of the `getByLabel` error, first and last
+name typed in fine. Both times failed with the exact same new message:
+`Object not found — screenshot: https://…`. That LOOKED like the
+screenshot-on-failure feature itself was broken, but reading the code
+that builds this message closely, "Object not found" is actually the
+REAL underlying error, with a screenshot link appended after it — not
+the other way around. Traced to `downloadToTemp()`, the function that
+pulls a document down from Supabase Storage so it can be attached to
+the form: it was hardcoded to look in the "documents" bucket for
+EVERY kind of file, but a check directly against the real Storage
+table showed Aisha Aman's profile photo actually lives in a separate
+"avatars" bucket — every other document (passport, transcript,
+certificate, birth certificate) really is in "documents," only the
+photo isn't. So the bot was looking for the photo in the wrong place
+and Storage correctly said it didn't exist there. Fixed by letting
+`downloadToTemp()` take which bucket to look in, and pointing the
+profile-photo step at "avatars" specifically. **Not yet re-tested since
+this fix — but this now means the bot got through Email fine and only
+tripped on a filing-cabinet mixup for the photo, one step further than
+the sixth test's Email bug.**
+
 **Sixth real test, 18 Sep 2026 (night): furthest yet — both fifth-test
 fixes confirmed working, and one brand-new bug on step 01 itself.**
 With the fifth fix's two bugs (the page-load hang and the double-click
