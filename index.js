@@ -473,6 +473,51 @@ async function smartFill(page, label, value, opts = {}){
   return { filled: false, reason: "no visible field found" };
 }
 
+// 18 Sep 2026, ninth real test: a real submission's own logs caught the
+// exact failure this was missing — step 03's document upload loop called
+// the raw `page.getByLabel(label).setInputFiles(...)` with no resilience
+// at all, and a real Diploma upload timed out after the default 60s and
+// THREW, which aborted the whole submission and discarded every field
+// step 01/02 had already filled successfully. smartFill() (above) already
+// solved this exact shape of problem for text fields — same guessed/
+// unconfirmed label risk, same "better blank than wrong" philosophy — but
+// it calls `.fill()`, which doesn't apply to a file input. This is that
+// same fix, adapted for `setInputFiles`: try every getByLabel candidate
+// and use the first visible one, with a short timeout instead of the
+// default 60s, and if none are visible, log it plainly and move on rather
+// than throwing. A skipped document is a real gap Nurudeen can catch and
+// re-upload by hand from the student's profile page; a crashed submission
+// throws away everything, including the fields that DID work.
+async function trySetInputFiles(page, label, filePath, opts = {}){
+  const timeout = opts.timeout || 8000;
+
+  const candidates = await page.getByLabel(label, { exact: opts.exact || false }).all();
+  for(const el of candidates){
+    try{
+      if(await el.isVisible()){
+        await el.setInputFiles(filePath, { timeout });
+        console.log(`[trySetInputFiles] "${label}": uploaded via getByLabel (${candidates.length} candidate(s) checked)`);
+        return { uploaded: true, method: "getByLabel" };
+      }
+    }catch(e){ /* try the next candidate */ }
+  }
+
+  // No visible getByLabel match — fall back to the label's own visible
+  // text on the page, then the nearest real file input that follows it.
+  try{
+    const labelNode = page.getByText(label, { exact: false }).first();
+    const nearInput = labelNode.locator("xpath=following::input[@type='file'][1]").first();
+    if(await nearInput.count()){
+      await nearInput.setInputFiles(filePath, { timeout });
+      console.log(`[trySetInputFiles] "${label}": uploaded via text-proximity fallback (0 visible getByLabel candidates)`);
+      return { uploaded: true, method: "text-proximity" };
+    }
+  }catch(e){ /* fall through to the skip-not-crash log below */ }
+
+  console.warn(`[trySetInputFiles] "${label}": no visible file input found (${candidates.length} getByLabel candidate(s), all hidden, no text-proximity match either) — skipped this document rather than crashing the whole submission`);
+  return { uploaded: false, reason: "no visible field found" };
+}
+
 async function fillAskUniApplication(page, app_row){
   const student = app_row.profiles || {};
   const programme = app_row.programmes || {};
@@ -539,7 +584,7 @@ async function fillAskUniApplication(page, app_row){
     // Orbuni's own upload flow for a student's photo has always kept it
     // there. `downloadToTemp` was hardcoded to "documents" for every kind,
     // so this was the one document that could never actually be found.
-    await page.getByLabel("Profile Picture").setInputFiles(await downloadToTemp(profilePhoto.storage_path, "avatars"));
+    await trySetInputFiles(page, "Profile Picture", await downloadToTemp(profilePhoto.storage_path, "avatars"));
   }
   await page.getByRole("button", { name: "Next" }).click();
 
@@ -612,7 +657,7 @@ async function fillAskUniApplication(page, app_row){
   const DOC_LABELS = { passport: "Passport", certificate: "Diploma", transcript: "Transcript" };
   for(const [kind, label] of Object.entries(DOC_LABELS)){
     const doc = findDoc(app_row, kind);
-    if(doc) await page.getByLabel(label).setInputFiles(await downloadToTemp(doc.storage_path));
+    if(doc) await trySetInputFiles(page, label, await downloadToTemp(doc.storage_path));
   }
   await page.getByRole("button", { name: "Next" }).click();
 
