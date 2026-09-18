@@ -191,6 +191,34 @@ async function handleStartSubmission(req, res){
     const liveViewUrl = debugInfo.debuggerFullscreenUrl;
     console.log("[submissions/start] got live view url");
 
+    // 18 Sep 2026 bug found here: a brand-new Browserbase session opens on
+    // a completely blank page — nothing about this code ever sent it
+    // anywhere. Nurudeen opening the live view therefore saw an empty
+    // "about:blank" tab with no clue what to do, and typing AskUni's own
+    // URL in by hand (which he tried) still leaves him unsure whether
+    // he's even looking at the right browser. Fixed by driving this same
+    // session, via the same CDP connection the /continue step uses later,
+    // straight to the real login page before anyone ever opens the live
+    // view — so the tab that opens is already sitting on AskUni's actual
+    // login form, ready to type a password into. Deliberately NOT calling
+    // browser.close() afterward: on a CDP-connected browser that ends the
+    // whole remote session, which would kill the very session Nurudeen is
+    // about to log into — only /continue (once the wizard is truly done)
+    // should ever close it.
+    try{
+      const startBrowser = await chromium.connectOverCDP(
+        `wss://connect.browserbase.com?apiKey=${env("BROWSERBASE_API_KEY","")}&sessionId=${session.id}`
+      );
+      const startPage = startBrowser.contexts()[0].pages()[0];
+      await startPage.goto(ASKUNI_PORTAL_URL + "/login/", { waitUntil: "domcontentloaded", timeout: 30000 });
+      console.log("[submissions/start] pre-navigated the live session to /login/");
+    }catch(navErr){
+      // Non-fatal: worst case Nurudeen lands on a blank tab and has to
+      // type the URL himself, same as before this fix — but the session
+      // and live view link below still work either way.
+      console.error("[submissions/start] pre-navigation to /login/ failed (non-fatal): " + String(navErr && navErr.message || navErr));
+    }
+
     // Stash which application this session is for, so /submissions/:id/continue
     // (called once staff confirms they've logged in) knows what to do next.
     const logged = await sb.from("ai_actions").insert({

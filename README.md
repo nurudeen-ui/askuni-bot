@@ -1,5 +1,25 @@
 # Orbuni ⇄ AskUni bot — deployed, all four wizard steps written
 
+**Fourth real test, 18 Sep 2026: the real explanation for "nothing
+happens" — the login tab was opening completely blank the whole time.**
+After the third fix went out, Nurudeen tried again and described (and
+photographed) something confusing: clicking "Send to AskUni" opened a
+tab, he came back, clicked "I'm logged in — Continue" and nothing
+seemed to happen, and a second tab he opened showed Browserbase's
+devtools view sitting on a literal blank "about:blank" page. The real,
+simple explanation: a brand-new Browserbase session opens on a
+completely blank page by default — this code never actually sent it
+anywhere. Every "Send to AskUni" click all along has been opening an
+empty tab with zero indication of what to do, and Nurudeen had
+correctly guessed he needed to type in AskUni's own login URL by hand,
+but had no way to know if he was even doing the right thing or looking
+at the right browser. Fixed for real this time: `/submissions` (the
+"Send to AskUni" click) now drives that same live session straight to
+the real login page (`https://apply.askuni.com/login/`, confirmed for
+real from Nurudeen's own message) before handing back the live view
+link — so the tab that opens is already sitting on AskUni's actual
+login form. **Not yet re-tested.**
+
 **Third real test, 18 Sep 2026: past login for the first time — a new,
 different failure, further into the flow than either bug before it.**
 With both fixes above live, Nurudeen tried again — and for the first
