@@ -410,7 +410,23 @@ export async function isLoggedIn(page, portalUrl){
 export async function login(page, portalUrl, email, password, log){
   if(!email || !password) throw new StepBlocked("login", [], "The AskUni login isn't set up yet: add ASKUNI_EMAIL and ASKUNI_PASSWORD in Render → askuni-bot → Environment.");
   if(!/\/login/i.test(page.url())) await page.goto(portalUrl + "/login/", { waitUntil: "domcontentloaded", timeout: 30000 });
-  await page.locator('input[type="password"]').first().waitFor({ state: "visible", timeout: 20000 }).catch(() => {});
+  // Since late September 2026 AskUni's login page first asks "Select your account type"
+  // (I'm a Student / I'm a Partner). Orbuni is a partner agency, so pick Partner first.
+  const pass = page.locator('input[type="password"]').first();
+  const picker = page.locator('button[aria-label="Sign in as Partner"]')
+    .or(page.getByRole("button", { name: /sign in as partner|i'?m a partner/i }))
+    .or(page.getByText(/^I'?m a Partner$/i)).first();
+  const t0 = Date.now();
+  while(Date.now() - t0 < 20000){
+    if(await pass.isVisible().catch(() => false)) break;
+    if(await picker.isVisible().catch(() => false)){
+      await picker.click().catch(() => {});
+      log && log("info", "chose 'I'm a Partner' on AskUni's login page");
+      await pass.waitFor({ state: "visible", timeout: 20000 }).catch(() => {});
+      break;
+    }
+    await page.waitForTimeout(400);
+  }
   const emailBox = (await firstVisible(page.locator('input[type="email"]')))
     || (await firstVisible(page.getByLabel(/e-?mail|user ?name|kullanıcı/i)))
     || (await firstVisible(page.locator('input[name*="mail" i], input[name*="user" i], input[id*="mail" i], input[autocomplete="username"]')))
