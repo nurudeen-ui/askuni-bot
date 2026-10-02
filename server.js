@@ -17,6 +17,7 @@ import express from "express";
 import { createClient } from "@supabase/supabase-js";
 import { chromium } from "playwright-core";
 import * as F from "./askuni-fill.js";
+import { runScan } from "./scan.js";
 
 const env = (k, d) => process.env[k] ?? d;
 const PORT = env("PORT", 3000);
@@ -366,5 +367,32 @@ function mapStatus(s){
   if(t.includes("declin") || t.includes("reject")) return "rejected";
   return s;
 }
+
+// ------------------------------------------------ reading AskUni on a timer (read only)
+// Every SCAN_MINUTES (default 15) the bot opens AskUni, reads the student list, applications,
+// commissions and menu pages, and keeps the raw text in askuni_scans. It never clicks Save,
+// Apply or Delete, and it steps aside whenever a student is being sent.
+const SCAN_MINUTES = Number(env("SCAN_MINUTES", "15"));
+let SCANNING = false;
+async function scanNow(){
+  if(SCANNING) return { skipped: "already reading AskUni" };
+  if(LIVE.size) return { skipped: "a student is being sent" };
+  SCANNING = true; let browser = null;
+  try{
+    browser = await launch();
+    const { context, page } = await newPage(browser);
+    await ensureLogin(page, context, () => {});
+    const n = await runScan(page, PORTAL, sb, (lvl, t) => console.log("[scan] " + t));
+    return { ok: true, pages: n };
+  }catch(e){
+    console.error("[scan] FAILED: " + String(e && e.message || e).split("\n")[0]);
+    return { error: String(e && e.message || e).split("\n")[0] };
+  }finally{
+    if(browser){ try{ await browser.close(); }catch(_){} }
+    SCANNING = false;
+  }
+}
+if(env("AUTO_SCAN", "on") !== "off"){ setTimeout(scanNow, 90e3); setInterval(scanNow, SCAN_MINUTES * 60e3); }
+app.post("/scan", requireInternalAuth, async (_req, res) => res.json(await scanNow()));
 
 app.listen(PORT, () => console.log("askuni-bot v3 listening on " + PORT + " — AskUni login " + (ASKUNI_EMAIL() && ASKUNI_PASSWORD() ? "set" : "NOT set")));
