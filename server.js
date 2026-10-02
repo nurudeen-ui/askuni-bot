@@ -17,6 +17,7 @@ import express from "express";
 import { createClient } from "@supabase/supabase-js";
 import { chromium } from "playwright-core";
 import * as F from "./askuni-fill.js";
+import * as P from "./preflight.js";
 import { runScan } from "./scan.js";
 import { runSync } from "./sync.js";
 
@@ -163,20 +164,26 @@ async function downloadToTemp(storagePath, bucket = "documents"){
 }
 async function prepare(row){
   const p = row.profiles || {}, d = p.student_details || {}, prog = row.programmes || {}, uni = prog.universities || {};
-  const files = {};
+  const files = {}, fileProblems = {};
+  // remembers why a file is absent ("missing", or the download error) so the checks can say so plainly
+  const grab = async (key, storagePath, bucket) => {
+    if(!storagePath){ if(!fileProblems[key]) fileProblems[key] = "missing"; return; }
+    try{ files[key] = await downloadToTemp(storagePath, bucket); delete fileProblems[key]; }
+    catch(e){ fileProblems[key] = String(e && e.message || e).split("\n")[0].slice(0, 120); }
+  };
   const photo = pickDoc(row, ["profile_photo"]);
-  if(photo) files.photo = await downloadToTemp(photo.storage_path, "avatars").catch(() => null);
-  if(!files.photo && p.photo_path) files.photo = await downloadToTemp(p.photo_path, "avatars").catch(() => null);
-  const pass = pickDoc(row, ["passport"]); if(pass) files.passport = await downloadToTemp(pass.storage_path).catch(() => null);
-  const dip = pickDoc(row, ["certificate", "diploma"]); if(dip) files.diploma = await downloadToTemp(dip.storage_path).catch(() => null);
-  const tr = pickDoc(row, ["transcript"]); if(tr) files.transcript = await downloadToTemp(tr.storage_path).catch(() => null);
+  await grab("photo", photo && photo.storage_path, "avatars");
+  if(!files.photo && p.photo_path) await grab("photo", p.photo_path, "avatars");
+  const pass = pickDoc(row, ["passport"]); await grab("passport", pass && pass.storage_path);
+  const dip = pickDoc(row, ["certificate", "diploma"]); await grab("diploma", dip && dip.storage_path);
+  const tr = pickDoc(row, ["transcript"]); await grab("transcript", tr && tr.storage_path);
   return {
     first_name: p.first_name, last_name: p.last_name, email: p.email, gender: (p.gender || "").toLowerCase() || null,
     phone: p.phone || p.whatsapp,
     passport_number: d.passport_number, date_of_birth: d.date_of_birth, nationality: d.nationality, country: d.country,
     country_of_birth: d.country_of_birth, city: d.city, address_line: d.address_line, mother_name: d.mother_name,
     father_name: d.father_name, passport_expiry: d.passport_expiry, passport_issue_date: d.passport_issue_date,
-    course: prog.course, university: uni.name, files,
+    course: prog.course, university: uni.name, files, fileProblems,
   };
 }
 async function cleanupFiles(data){
@@ -193,25 +200,41 @@ async function runJob(sessionId, subId, applicationId){
   const page = e.page;
   const log = (level, text) => { console.log("[job " + subId.slice(0, 8) + "] " + text); track(subId, {}, { level, text }); };
   let data = null;
+  let reached = 0;   // highest form step started; from step 2 on, AskUni already has the student's account
+  const onStep = (n, name) => { reached = Math.max(reached, n); return track(subId, { step: name, message: "On " + name + "…" }); };
   try{
-    await track(subId, { status: "filling", message: "Logging in to AskUni…", missing: [], screenshot_url: null });
-    await ensureLogin(page, e.context, log);
-    await track(subId, { message: "Filling in AskUni's form…" });
+    await track(subId, { status: "filling", message: "Checking the student's details and documents…", missing: [], screenshot_url: null });
     const row = await loadApplication(applicationId);   // fresh every time, so fixes made in Orbuni are picked up
     if(!row) throw new Error("This application no longer exists in Orbuni.");
     data = await prepare(row);
+    // Check everything before typing into AskUni, so a send that would fail halfway never creates an AskUni account.
+    const stepNow = await F.currentStep(page);
+    reached = stepNow;
+    const check = await P.preflight(data, stepNow);
+    for(const w of check.warnings) log("warn", "check: " + w);
+    if(check.blockers.length){
+      const msg = "Fix these in Orbuni first: " + check.blockers.join("; ") + ".";
+      // not started yet: nothing exists in AskUni, so just stop; halfway: keep the form open for Carry on
+      if(!stepNow) throw new Error("Nothing was sent to AskUni. " + msg);
+      throw new F.StepBlocked("checks", check.blockers.map(b => ({ field: "Orbuni", message: b })), msg);
+    }
+    await track(subId, { message: "Logging in to AskUni…" });
+    await ensureLogin(page, e.context, log);
+    await track(subId, { message: "Filling in AskUni's form…" });
     if(!(await F.currentStep(page))) await F.openWizard(page, PORTAL, log);
     let out;
     try{
-      out = await F.runWizard(page, data, log, (n, name) => track(subId, { step: name, message: "On " + name + "…" }));
+      out = await F.runWizard(page, data, log, onStep);
     }catch(err){
-      // AskUni signed us out halfway: log in again once and carry on from the start of the form
       if(!(err instanceof F.StepBlocked) || err.step !== "login") throw err;
-      log("warn", "AskUni asked to log in again");
       SAVED_LOGIN = null;
+      // Starting the form again would create a second AskUni student once step 1 was accepted.
+      if(reached >= 2) throw new Error("AskUni signed the bot out after this student's AskUni account was already created, so the bot stopped instead of starting again (that would make a second AskUni student). Finish this student by hand in AskUni — don't press Send to AskUni again for them.");
+      // Still on step 1: nothing exists in AskUni yet, so log in again once and start the form again.
+      log("warn", "AskUni asked to log in again");
       await ensureLogin(page, e.context, log);
       await F.openWizard(page, PORTAL, log);
-      out = await F.runWizard(page, data, log, (n, name) => track(subId, { step: name, message: "On " + name + "…" }));
+      out = await F.runWizard(page, data, log, onStep);
     }
     await sb.from("applications").update({
       status: "sent_to_university", submitted_at: new Date().toISOString(),
@@ -293,6 +316,46 @@ app.post("/submissions/:sessionId/cancel", requireInternalAuth, async (req, res)
   await closeSession(req.params.sessionId);
   if(subId){ await track(subId, { status: "cancelled", message: "Cancelled." }); await dropShots(subId); }
   res.json({ ok: true });
+});
+
+// Dry run: what a send WOULD do for one application, without typing anything into AskUni.
+// Reads the student from Orbuni, downloads and checks the documents, and returns the step-by-step
+// plan with "ready / missing / problem" for each field (never the values themselves).
+// { application_id, check_login: true } also logs in to AskUni and opens the student list —
+// read only, no form is opened — to prove the AskUni login works.
+app.post("/dry-run", requireInternalAuth, async (req, res) => {
+  const application_id = req.body && req.body.application_id;
+  if(!application_id) return res.status(400).json({ error: "application_id required" });
+  let data = null;
+  try{
+    const row = await loadApplication(application_id);
+    if(!row) return res.status(404).json({ error: "No Orbuni application with that id." });
+    data = await prepare(row);
+    const report = await P.preflight(data, 0);
+    report.application_id = application_id;
+    report.would_send = report.ok ? "yes — every required item is there" : "no — the send would stop with: " + report.blockers.join("; ");
+    if(req.body.check_login){
+      if(LIVE.size || SCANNING) report.askuni_login = "not checked: the bot is busy (a send or the 15-minute sync is running) — try again in a few minutes";
+      else{
+        SCANNING = true; let browser = null;   // keeps the timed sync from starting a second browser meanwhile
+        try{
+          browser = await launch();
+          const { context, page } = await newPage(browser);
+          await ensureLogin(page, context, () => {});
+          report.askuni_login = "ok — logged in and the student list opened";
+        }catch(e){ report.askuni_login = "failed: " + String(e && e.message || e).split("\n")[0]; }
+        finally{ if(browser){ try{ await browser.close(); }catch(_){} } SCANNING = false; }
+      }
+    }
+    report.not_done = "Dry run: nothing was typed into AskUni and nothing was submitted.";
+    console.log("[dry-run] " + application_id.slice(0, 8) + " — " + report.would_send);
+    for(const line of P.planSummary(report)) console.log("[dry-run]   " + line);
+    res.json(report);
+  }catch(e){
+    res.status(500).json({ error: String(e && e.message || e).split("\n")[0] });
+  }finally{
+    await cleanupFiles(data);
+  }
 });
 
 // Check AskUni for decisions and commissions.
