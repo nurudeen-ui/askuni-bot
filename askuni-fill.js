@@ -1,4 +1,4 @@
-// askuni-fill.js — version 3.2 (2 Oct 2026): step detection only counts the Add Student pop-up; dropdowns have keyboard + markup fallbacks
+// askuni-fill.js — version 4.0 (2 Oct 2026): one engine for every dropdown, date and upload (strict check, several ways to fill, label variants, field inventory in the log)
 // Orbuni ⇄ AskUni — the part that actually fills AskUni's "Add Student User"
 // wizard. Kept separate from the web server (index.js) so it can be tested
 // against a local copy of the wizard without touching the real site.
@@ -115,9 +115,37 @@ export async function fillText(page, label, value, log){
 }
 
 // ------------------------------------------------------------ dropdowns
+// The part of a dropdown a person would click: skips the invisible helper input many widgets hide
+// behind the real control (aria-hidden, opacity 0, no pointer events).
+async function findControl(box){
+  const cands = box.locator('[role=combobox], [aria-haspopup], [tabindex="0"]:not(input), input:not([type=hidden]):not([type=file]), div[class*="select" i], div[class*="dropdown" i]');
+  const n = await cands.count();
+  let firstSeen = null;
+  for(let i = 0; i < n; i++){
+    const el = cands.nth(i);
+    if(!(await el.isVisible().catch(() => false))) continue;
+    if(!firstSeen) firstSeen = el;
+    const clickable = await el.evaluate((e) => {
+      const st = getComputedStyle(e);
+      return e.getAttribute("aria-hidden") !== "true" && st.opacity !== "0" && st.pointerEvents !== "none" && e.getAttribute("tabindex") !== "-1";
+    }).catch(() => true);
+    if(clickable) return el;
+  }
+  return firstSeen;
+}
+// Click a control; if something sits on top of it, click the field's own box instead, then its centre point.
+async function openControl(page, box, control){
+  try{ await control.click({ timeout: 2500 }); return true; }catch(e){}
+  try{ await box.click({ timeout: 2500, force: true }); return true; }catch(e){}
+  try{
+    const r = await box.boundingBox();
+    if(r){ await page.mouse.click(r.x + r.width / 2, r.y + r.height / 2); return true; }
+  }catch(e){}
+  return false;
+}
 // Works for a plain <select>, a MUI Select (click → pick from a list) and a
 // MUI Autocomplete (type → pick). `wanted` is a list of acceptable texts.
-export async function pickOption(page, label, wanted, log){
+async function pickOptionCore(page, label, wanted, log){
   wanted = (Array.isArray(wanted) ? wanted : [wanted]).filter(Boolean);
   if(!wanted.length) return { ok:false, reason:"no value in Orbuni" };
   const scope = await scopeOf(page);
@@ -131,9 +159,9 @@ export async function pickOption(page, label, wanted, log){
     if(hit != null){ await sel.first().selectOption({ label: hit }); log && log("info", `${label}: chose "${hit}"`); return { ok:true, chose:hit }; }
   }
 
-  const control = await firstVisible(box.locator("[role=combobox], [aria-haspopup=listbox], input:not([type=hidden]):not([type=file])"));
+  const control = await findControl(box);
   if(!control){ log && log("warn", `${label}: no clickable control`); return { ok:false, reason:"no control" }; }
-  await control.click({ timeout: 8000 });
+  await openControl(page, box, control);
   const typeable = await control.evaluate(e => e.tagName === "INPUT" && !e.readOnly).catch(() => false);
   if(typeable){ await control.fill(""); await control.pressSequentially(wanted[0].slice(0, 24), { delay: 25 }); }
 
@@ -145,9 +173,11 @@ export async function pickOption(page, label, wanted, log){
       await page.keyboard.press("Escape").catch(() => {});
       // Last resorts: drive the control with the keyboard (open it, type the first
       // letters, Enter), then trust only what the box itself shows afterwards.
+      const vt = await pickByVisibleText(page, box, control, wanted, log, label);
+      if(vt) return vt;
       const kb = await pickByKeyboard(page, box, control, wanted, log, label);
       if(kb) return kb;
-      await describeField(box, log, label);
+      await describeField(page, box, log, label);
       log && log("warn", `${label}: no list of choices opened`);
       return { ok:false, reason:"no list opened" };
     }
@@ -166,6 +196,36 @@ export async function pickOption(page, label, wanted, log){
   log && log("info", `${label}: chose "${hit.trim()}"`);
   return { ok:true, chose:hit.trim() };
 }
+// The one dropdown entry point. Picks with the normal list; if that finds nothing, or the choice
+// does not stick when the box loses focus, tries clicking the visible choice and then the keyboard.
+export async function pickOption(page, label, wanted, log){
+  try{ return await pickOptionSafe(page, label, wanted, log); }
+  catch(e){ log && log("warn", `${label}: ${String(e.message || e).split("\n")[0].slice(0, 120)}`); return { ok:false, reason:"error" }; }
+}
+async function pickOptionSafe(page, label, wanted, log){
+  wanted = (Array.isArray(wanted) ? wanted : [wanted]).filter(Boolean);
+  if(!wanted.length) return { ok:false, reason:"no value in Orbuni" };
+  let r;
+  try{ r = await pickOptionCore(page, label, wanted, log); }
+  catch(e){ log && log("warn", `${label}: first way failed (${String(e.message || e).split("\n")[0].slice(0, 90)})`); r = { ok:false, reason:"no control" }; }
+  const scope = await scopeOf(page);
+  const box = await fieldBox(scope, label);
+  if(!box) return r;
+  if(r.ok){
+    if(await confirmChosen(page, box, wanted)) return r;
+    log && log("warn", `${label}: the choice did not stick, trying another way`);
+  }else if(r.reason !== "no list opened" && r.reason !== "no control"){
+    return r;
+  }
+  const control = await findControl(box);
+  if(!control) return r;
+  const vt = await pickByVisibleText(page, box, control, wanted, log, label);
+  if(vt) return vt;
+  const kb = await pickByKeyboard(page, box, control, wanted, log, label);
+  if(kb) return kb;
+  if(r.ok) await describeField(page, box, log, label);
+  return { ok:false, reason:"could not set it" };
+}
 // What the box shows now (its visible text and input values), lower-cased.
 async function shownIn(box){
   return await box.evaluate((el) => {
@@ -173,10 +233,50 @@ async function shownIn(box){
     return ((el.innerText || "") + " " + vals).toLowerCase();
   }).catch(() => "");
 }
-// Keyboard fallback for dropdowns that never show a list we can see.
-async function pickByKeyboard(page, box, control, wanted, log, label){
+// Proof that a choice really stuck: let go of the box (a word that was only typed, never
+// chosen, is cleared when the box loses focus), then see whether the box still shows it.
+async function confirmChosen(page, box, wanted){
   const targets = wanted.map(w => norm(w)).filter(Boolean);
-  const done = async () => { const t = norm(await shownIn(box)); return targets.some(w => t.includes(w)); };
+  await page.keyboard.press("Tab").catch(() => {});
+  await page.waitForTimeout(400);
+  const t = norm(await shownIn(box));
+  return targets.some(w => new RegExp("(^|[^a-z])" + esc(w) + "([^a-z]|$)").test(t));
+}
+// Open the dropdown and click whatever visible, un-covered element says exactly the wanted
+// word. The student list behind the pop-up also says "Male"/"Female", but it is covered, so
+// it is never picked.
+async function pickByVisibleText(page, box, control, wanted, log, label){
+  const names = wanted.map(w => String(w).trim().toLowerCase()).filter(Boolean);
+  await openControl(page, box, control);
+  const typeable = await control.evaluate(e => e.tagName === "INPUT" && !e.readOnly && e.getAttribute("aria-hidden") !== "true").catch(() => false);
+  if(typeable){ await control.fill("").catch(() => {}); await control.pressSequentially(String(wanted[0]).slice(0, 24), { delay: 30 }).catch(() => {}); }
+  await page.waitForTimeout(800);
+  const handle = await page.evaluateHandle((names) => {
+    const own = (el) => Array.from(el.childNodes).filter(n => n.nodeType === 3).map(n => n.textContent).join("").trim().toLowerCase();
+    const found = Array.from(document.querySelectorAll("body *")).filter((el) => {
+      if(!names.includes(own(el))) return false;
+      if(el.closest("table, tr, td, [role=row], [role=gridcell]")) return false;
+      let r = el.getBoundingClientRect();
+      if(r.width <= 0 || r.height <= 0) return false;
+      const st = getComputedStyle(el);
+      if(st.visibility === "hidden" || st.display === "none") return false;
+      if(r.bottom < 0 || r.top > innerHeight){ el.scrollIntoView({ block:"center" }); r = el.getBoundingClientRect(); }
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      if(cx < 0 || cy < 0 || cx > innerWidth || cy > innerHeight) return false;
+      const top = document.elementFromPoint(cx, cy);
+      return !!top && (top === el || el.contains(top) || top.contains(el));
+    });
+    return found.length ? found[0] : null;
+  }, names);
+  const el = handle.asElement();
+  if(!el) return null;
+  await el.click({ timeout: 5000 }).catch(() => {});
+  await page.waitForTimeout(500);
+  if(await confirmChosen(page, box, wanted)){ log && log("info", `${label}: chose "${wanted[0]}" (clicked the visible choice)`); return { ok:true, chose:String(wanted[0]) }; }
+  return null;
+}
+// Keyboard fallback: open the control, type the first letters, Enter - then prove it stuck.
+async function pickByKeyboard(page, box, control, wanted, log, label){
   for(const key of ["Enter", "ArrowDown", "Space"]){
     try{
       await control.focus().catch(() => {});
@@ -185,17 +285,25 @@ async function pickByKeyboard(page, box, control, wanted, log, label){
       await page.keyboard.type(String(wanted[0]).slice(0, 4), { delay: 60 });
       await page.keyboard.press("Enter").catch(() => {});
       await page.waitForTimeout(500);
-      if(await done()){ log && log("info", `${label}: chose "${wanted[0]}" (keyboard)`); return { ok:true, chose:String(wanted[0]) }; }
-      await page.keyboard.press("Escape").catch(() => {});
+      if(await confirmChosen(page, box, wanted)){ log && log("info", `${label}: chose "${wanted[0]}" (keyboard)`); return { ok:true, chose:String(wanted[0]) }; }
     }catch(e){}
   }
   return null;
 }
-// When a field cannot be filled, record a short look at its markup so the next fix is exact.
-async function describeField(box, log, label){
+// When a field cannot be filled, record a short look at its markup and at any open list,
+// so the next fix is exact.
+async function describeField(page, box, log, label){
   try{
     const html = await box.evaluate((el) => el.outerHTML.replace(/\s+/g, " ").replace(/data:[^"']{20,}/g, "data:…").slice(0, 700));
     log && log("info", `${label}: field markup → ${html}`);
+  }catch(e){}
+  try{
+    const layer = await page.evaluate(() => {
+      const vis = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+      return Array.from(document.querySelectorAll('[role=listbox],[role=menu],[class*="menu" i],[class*="popover" i],[class*="dropdown" i],[class*="option" i]'))
+        .filter(vis).slice(0, 2).map(e => e.outerHTML.replace(/\s+/g, " ").slice(0, 500));
+    });
+    if(layer.length) log && log("info", `${label}: open list markup → ${layer.join("  ||  ")}`);
   }catch(e){}
 }
 function bestMatch(list, wanted){
@@ -251,8 +359,19 @@ export async function fillDate(page, label, iso, log){
   await el.press("Backspace").catch(() => {});
   await el.pressSequentially(out, { delay: 30 });
   await el.press("Tab").catch(() => {});
-  const v = await el.inputValue().catch(() => "");
-  const ok = v.replace(/\D/g, "").length >= 8;
+  let v = await el.inputValue().catch(() => "");
+  let ok = v.replace(/\D/g, "").length >= 8;
+  if(!ok){
+    // Segmented date boxes (day / month / year) take plain digits, in the order they show.
+    const order = /^Y/.test(ph) ? `${y}${m}${d}` : /^M/.test(ph) ? `${m}${d}${y}` : `${d}${m}${y}`;
+    await el.click({ timeout: 8000 }).catch(() => {});
+    await el.press("Control+A").catch(() => {});
+    await el.press("Backspace").catch(() => {});
+    await el.pressSequentially(order, { delay: 40 });
+    await el.press("Tab").catch(() => {});
+    v = await el.inputValue().catch(() => "");
+    ok = v.replace(/\D/g, "").length >= 8;
+  }
   log && log(ok ? "info" : "warn", `${label}: ${ok ? "filled as " + (ph || "DD/MM/YYYY") : "typed, but the box didn't take it"}`);
   return { ok };
 }
@@ -261,6 +380,31 @@ export async function fillDate(page, label, iso, log){
 // Works when the real <input type=file> is hidden behind a button (setting
 // files on a hidden input is fine), and falls back to clicking the visible
 // upload button and answering the file chooser.
+// After a file is chosen, wait for its name to show up in the pop-up (AskUni uploads in the background).
+async function uploadShown(page, filePath){
+  const base = String(filePath).split(/[\\/]/).pop().replace(/\.[^.]+$/, "").slice(0, 18).toLowerCase();
+  if(!base) return true;
+  for(let i = 0; i < 16; i++){
+    const w = wizard(page);
+    const txt = ((await w.count()) ? await w.innerText().catch(() => "") : "").toLowerCase();
+    if(txt.includes(base)) return true;
+    await page.waitForTimeout(500);
+  }
+  return false;
+}
+// Last resort for the documents step: the n-th file box in the pop-up (Passport, Diploma, Transcript).
+export async function uploadByPosition(page, index, filePath, log, label){
+  if(!filePath) return { ok:false, reason:"no file in Orbuni" };
+  const w = wizard(page);
+  const inputs = (await w.count()) ? w.locator("input[type=file]") : page.locator("input[type=file]");
+  if((await inputs.count()) <= index) return { ok:false, reason:"upload spot not found" };
+  try{
+    await inputs.nth(index).setInputFiles(filePath, { timeout: 8000 });
+    const shown = await uploadShown(page, filePath);
+    log && log(shown ? "info" : "warn", `${label}: uploaded (by position ${index + 1})${shown ? "" : ", but its name did not appear"}`);
+    return { ok:true };
+  }catch(e){ return { ok:false, reason:"upload spot not found" }; }
+}
 export async function uploadFile(page, label, filePath, log){
   if(!filePath) return { ok:false, reason:"no file in Orbuni" };
   const scope = await scopeOf(page);
@@ -272,7 +416,12 @@ export async function uploadFile(page, label, filePath, log){
     const box = t.locator("xpath=ancestor-or-self::*[.//input[@type='file']][1]");
     if(await box.count()){
       const inp = box.first().locator("input[type=file]").first();
-      try{ await inp.setInputFiles(filePath, { timeout: 8000 }); log && log("info", `${label}: uploaded`); return { ok:true }; }catch(e){}
+      try{
+        await inp.setInputFiles(filePath, { timeout: 8000 });
+        const shown = await uploadShown(page, filePath);
+        log && log(shown ? "info" : "warn", `${label}: uploaded${shown ? "" : ", but its name did not appear"}`);
+        return { ok:true };
+      }catch(e){}
     }
     const near = t.locator("xpath=ancestor-or-self::*[.//button or .//*[@role='button']][1]").first();
     const btn = await firstVisible(near.locator("button, [role=button], label"));
@@ -289,12 +438,75 @@ export async function uploadFile(page, label, filePath, log){
   return { ok:false, reason:"upload spot not found" };
 }
 
+
+// ------------------------------------------------------------ what the form really contains
+// Every field label in the open pop-up with its control type. Logged at the start of each step so
+// a wrong label guess shows up at once, and used to find a field under a different wording.
+async function domLabels(page){
+  const w = wizard(page);
+  if(!(await w.count())) return [];
+  return await w.evaluate((root) => {
+    const vis = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    const clean = (t) => (t || "").replace(/\*/g, "").replace(/\s+/g, " ").trim();
+    const out = []; const seen = new Set();
+    root.querySelectorAll("label, legend, .MuiInputLabel-root, .MuiFormLabel-root").forEach((l) => {
+      if(!vis(l)) return;
+      const text = clean(l.textContent);
+      if(!text || text.length > 60 || seen.has(text)) return;
+      seen.add(text);
+      let c = null, p = l;
+      for(let i = 0; i < 4 && p && !c; i++){ p = p.parentElement; if(p) c = p.querySelector("input,select,textarea,[role=combobox],[aria-haspopup]"); }
+      let type = "?";
+      if(c){
+        const t = c.tagName;
+        type = t === "SELECT" ? "select" : t === "TEXTAREA" ? "textarea" : (c.getAttribute("role") === "combobox" || c.getAttribute("aria-haspopup")) ? "dropdown" : (c.type || "text");
+        if(c.type === "checkbox") type = "toggle";
+        if(c.type === "file") type = "file";
+      }
+      out.push({ text, type });
+    });
+    return out;
+  }).catch(() => []);
+}
+async function inventory(page, log, stepName){
+  try{
+    const labels = await domLabels(page);
+    const w = wizard(page);
+    const files = (await w.count()) ? await w.locator("input[type=file]").count() : 0;
+    log && log("info", `${stepName} fields → ${labels.map(l => l.text + "(" + l.type + ")").join(", ") || "none seen"}${files ? " · file inputs: " + files : ""}`);
+  }catch(e){}
+}
+// One stuck field must never stop the rest of the form.
+async function safely(doIt, label, log){
+  try{ return await doIt(label); }
+  catch(e){ log && log("warn", `${label}: ${String(e.message || e).split("\n")[0].slice(0, 120)}`); return { ok:false, reason:"error" }; }
+}
+// Try each wording of a field's label; if none exists, look for any label on screen that matches.
+async function fillAny(page, variants, rx, doIt, log){
+  let last = { ok:false, reason:"box not found" };
+  const tried = new Set();
+  for(const v of variants){
+    tried.add(v.toLowerCase());
+    last = await safely(doIt, v, log);
+    if(last.ok) return last;
+    if(last.reason && !/not found|no control|error/i.test(last.reason)) return last;
+  }
+  const seen = await domLabels(page);
+  for(const l of seen){
+    if(tried.has(l.text.toLowerCase()) || !rx.test(l.text)) continue;
+    log && log("info", `using the label "${l.text}" for ${variants[0]}`);
+    last = await safely(doIt, l.text, log);
+    if(last.ok) return last;
+  }
+  return last;
+}
+
 // ------------------------------------------------------------ steps
 // What proves each step is really on screen.
 const STEP_MARK = {
   1: (s) => s.getByText(/^\s*First Name\s*\*?\s*$/i),
-  2: (s) => s.getByText(/^\s*Passport Number\s*\*?\s*$/i),
-  3: (s) => s.getByText(/^\s*(Diploma|Transcript)\s*\*?\s*$/i),
+  2: (s) => s.getByText(/^\s*(Passport Number|Birth Date|Date of Birth|Mother Name|Father Name|Country of Birth)\s*\*?\s*$/i),
+  3: (s) => s.getByText(/^\s*(Diploma|Transcript)\s*\*?\s*$|Drop\s+(a\s+)?files?\s+here/i),
   4: (s, page) => page.getByPlaceholder(/Type Interested Program/i),
 };
 export async function currentStep(page){
@@ -327,22 +539,41 @@ export async function readErrors(page){
     return out;
   }).catch(() => []);
 }
+// Anything AskUni is saying right now: toasts, alerts, red helper text, and the pop-up's own words.
+async function whatPageSays(page){
+  return await page.evaluate(() => {
+    const vis = (e) => { const r = e.getBoundingClientRect(); const st = getComputedStyle(e); return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none"; };
+    const pick = (sel) => Array.from(document.querySelectorAll(sel)).filter(vis).map(e => (e.innerText || "").replace(/\s+/g, " ").trim()).filter(Boolean);
+    const alerts = pick('[role=alert], [role=status], .Toastify__toast, .MuiSnackbar-root, .MuiAlert-root, .swal2-popup, [class*="toast" i], [class*="snack" i], [class*="notif" i]');
+    const errs = pick('.MuiFormHelperText-root.Mui-error, [class*="error" i], .invalid-feedback');
+    const dlg = Array.from(document.querySelectorAll('[role="dialog"]')).filter(vis).map(e => (e.innerText || "").replace(/\s+/g, " ").trim().slice(0, 260));
+    return { alerts: alerts.slice(0, 4), errs: errs.slice(0, 4), dialog: dlg.slice(-1)[0] || "" };
+  }).catch(() => ({ alerts: [], errs: [], dialog: "" }));
+}
 export async function nextStep(page, fromStep, log){
   const scope = await scopeOf(page);
   const next = await firstVisible(scope.getByRole("button", { name: /^\s*next\s*$/i }));
   if(!next) throw new StepBlocked(STEP_NAMES[fromStep], [], "The Next button isn't on screen.");
+  // Give a just-chosen photo time to finish, and wait until Next can be pressed.
+  await page.waitForTimeout(2500);
+  for(let i = 0; i < 20 && !(await next.isEnabled().catch(() => true)); i++) await page.waitForTimeout(500);
+  await next.scrollIntoViewIfNeeded().catch(() => {});
   await next.click();
   const mark = STEP_MARK[fromStep + 1];
-  const deadline = Date.now() + 12000;
+  const deadline = Date.now() + 30000;   // AskUni creates the account before it shows the next step
   while(Date.now() < deadline){
     const s = await scopeOf(page);
     if(await firstVisible(mark(s, page))){ log && log("info", `moved on to ${STEP_NAMES[fromStep + 1]}`); return; }
     await page.waitForTimeout(400);
   }
   const errors = await readErrors(page);
-  throw new StepBlocked(STEP_NAMES[fromStep], errors,
-    errors.length ? ("AskUni wants: " + errors.map(e => e.field + " — " + e.message).join("; "))
-                  : "AskUni didn't open the next step and showed no reason.");
+  if(errors.length) throw new StepBlocked(STEP_NAMES[fromStep], errors, "AskUni wants: " + errors.map(e => e.field + " — " + e.message).join("; "));
+  const said = await whatPageSays(page);
+  const words = [...said.alerts, ...said.errs].join(" | ");
+  log && log("info", `AskUni's screen after Next → alerts: [${said.alerts.join(" | ")}] errors: [${said.errs.join(" | ")}] pop-up: ${said.dialog}`);
+  throw new StepBlocked(STEP_NAMES[fromStep], [],
+    words ? ("AskUni didn't open the next step. It says: " + words.slice(0, 280))
+          : "AskUni didn't open the next step and showed no reason.");
 }
 
 // ------------------------------------------------------------ the wizard
@@ -357,35 +588,44 @@ export async function openWizard(page, portalUrl, log){
 }
 
 export async function step1(page, d, log){
-  await fillText(page, "First Name", d.first_name, log);
-  await fillText(page, "Last Name", d.last_name, log);
+  await fillAny(page, ["First Name"], /first\s*name|^name$|given/i, (l) => fillText(page, l, d.first_name, log), log);
+  await fillAny(page, ["Last Name"], /last\s*name|sur\s*name|family/i, (l) => fillText(page, l, d.last_name, log), log);
   const scope = await scopeOf(page);
   const email = (await firstVisible(scope.locator("#eMail"))) || (await firstVisible(scope.getByLabel(/^\s*e-?mail\s*\*?\s*$/i)));
   if(email && d.email){ await email.fill(d.email); log && log("info", "Email: filled"); }
-  await pickOption(page, "Gender", d.gender === "female" ? ["Female", "Woman", "Kadın"] : d.gender === "male" ? ["Male", "Man", "Erkek"] : [], log);
+  const g = d.gender === "female" ? ["Female", "Woman", "Kadın"] : d.gender === "male" ? ["Male", "Man", "Erkek"] : [];
+  await fillAny(page, ["Gender", "Sex"], /gender|sex/i, (l) => pickOption(page, l, g, log), log);
   await fillPhone(page, "Mobile Phone", d.phone, log);
-  if(d.files.photo) await uploadFile(page, "Profile Picture", d.files.photo, log);
+  if(d.files.photo) await fillAny(page, ["Profile Picture", "Profile Photo", "Photo"], /profile|photo|picture|avatar/i, (l) => uploadFile(page, l, d.files.photo, log), log);
   await nextStep(page, 1, log);
 }
 export async function step2(page, d, log){
-  await fillText(page, "Passport Number", d.passport_number, log);
-  await fillDate(page, "Birth Date", d.date_of_birth, log);
   const nat = countryName(d.nationality), res = countryName(d.country) || nat, birth = countryName(d.country_of_birth) || nat;
-  await pickOption(page, "Country of Birth", countryAliases(birth), log);
-  await pickOption(page, "Country of Residence", countryAliases(res), log);
-  await pickOption(page, "Nationality", countryAliases(nat).concat(d.nationality ? [d.nationality] : []), log);
-  await fillText(page, "City of Residence", d.city, log);
-  await fillText(page, "Address", d.address_line, log);
-  await fillText(page, "Mother Name", d.mother_name, log);
-  await fillText(page, "Father Name", d.father_name, log);
-  await fillDate(page, "Passport Date of Expire", d.passport_expiry, log);
-  await fillDate(page, "Passport Date of Issue", d.passport_issue_date, log);
+  const text = (variants, rx, v) => fillAny(page, variants, rx, (l) => fillText(page, l, v, log), log);
+  const date = (variants, rx, v) => fillAny(page, variants, rx, (l) => fillDate(page, l, v, log), log);
+  const pick = (variants, rx, v) => fillAny(page, variants, rx, (l) => pickOption(page, l, v, log), log);
+  await text(["Passport Number", "Passport No", "Passport No."], /passport\s*(no|num|#)/i, d.passport_number);
+  await date(["Birth Date", "Date of Birth", "Birthday"], /birth\s*date|date\s*of\s*birth|birthday|^dob$/i, d.date_of_birth);
+  await pick(["Country of Birth", "Birth Country", "Place of Birth"], /country\s*of\s*birth|birth\s*country|place\s*of\s*birth/i, countryAliases(birth));
+  await pick(["Country of Residence", "Residence Country", "Country"], /residen|^country$/i, countryAliases(res));
+  await pick(["Nationality", "Citizenship"], /national|citizen/i, countryAliases(nat).concat(d.nationality ? [d.nationality] : []));
+  await text(["City of Residence", "City"], /city/i, d.city);
+  await text(["Address", "Home Address", "Residence Address"], /address/i, d.address_line);
+  await text(["Mother Name", "Mother's Name", "Mother Full Name"], /mother/i, d.mother_name);
+  await text(["Father Name", "Father's Name", "Father Full Name"], /father/i, d.father_name);
+  await date(["Passport Date of Expire", "Passport Expiry Date", "Passport Expiration Date", "Date of Expire", "Expiry Date"], /expir/i, d.passport_expiry);
+  await date(["Passport Date of Issue", "Passport Issue Date", "Date of Issue", "Issue Date"], /issue/i, d.passport_issue_date);
   await nextStep(page, 2, log);
 }
 export async function step3(page, d, log){
-  await uploadFile(page, "Passport", d.files.passport, log);
-  await uploadFile(page, "Diploma", d.files.diploma, log);
-  await uploadFile(page, "Transcript", d.files.transcript, log);
+  const doc = async (variants, rx, file, index) => {
+    const r = await fillAny(page, variants, rx, (l) => uploadFile(page, l, file, log), log);
+    if(!r.ok && file) return await uploadByPosition(page, index, file, log, variants[0]);
+    return r;
+  };
+  await doc(["Passport", "Passport Copy", "Passport Scan"], /passport/i, d.files.passport, 0);
+  await doc(["Diploma", "High School Diploma", "Diploma Certificate"], /diploma|certificate/i, d.files.diploma, 1);
+  await doc(["Transcript", "Transcripts", "Academic Transcript"], /transcript/i, d.files.transcript, 2);
   await nextStep(page, 3, log);
 }
 export async function step4(page, d, log){
@@ -421,6 +661,7 @@ export async function runWizard(page, d, log, onStep){
   const steps = { 1: step1, 2: step2, 3: step3 };
   while(at < 4){
     onStep && await onStep(at, STEP_NAMES[at]);
+    await inventory(page, log, STEP_NAMES[at]);
     await steps[at](page, d, log);
     at += 1;
   }
