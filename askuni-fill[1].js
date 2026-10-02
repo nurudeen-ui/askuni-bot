@@ -1,3 +1,4 @@
+// askuni-fill.js — version 3.1 (2 Oct 2026): step detection only counts the Add Student pop-up
 // Orbuni ⇄ AskUni — the part that actually fills AskUni's "Add Student User"
 // wizard. Kept separate from the web server (index.js) so it can be tested
 // against a local copy of the wizard without touching the real site.
