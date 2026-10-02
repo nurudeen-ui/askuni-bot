@@ -1,17 +1,18 @@
 {
   "name": "orbuni-askuni-bot",
-  "version": "0.1.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "Runs on Render. Talks to Browserbase to submit Orbuni applications into the real AskUni portal and check for responses, using one manual login (Live View) that then stays signed in via a saved Browserbase context.",
+  "description": "Runs on Render. Opens its own browser, logs in to the AskUni partner portal and submits Orbuni applications into it, then checks AskUni for responses. No Browserbase.",
   "type": "module",
   "main": "index.js",
+  "engines": { "node": ">=20" },
   "scripts": {
+    "postinstall": "PLAYWRIGHT_BROWSERS_PATH=0 playwright-core install chromium --only-shell --no-progress",
     "start": "node index.js"
   },
   "dependencies": {
-    "@browserbasehq/sdk": "^2",
     "@supabase/supabase-js": "^2",
     "express": "^4",
-    "playwright-core": "^1"
+    "playwright-core": "~1.63.0"
   }
 }
