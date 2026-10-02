@@ -84,11 +84,10 @@ async function readAll(page, url, log){
 }
 const col = (headers, row, name) => { const i = headers.indexOf(name); return i >= 0 ? row.cells[i] : undefined; };
 
-async function matchApplication(sb, studentName, program){
+async function matchApplication(sb, studentName, program, profs){
   const parts = String(studentName || "").trim().split(/\s+/);
   if(parts.length < 2) return null;
   // names are matched on all the words, in any order, so "USMAN SHEHU MAISANGO" finds first "Usman" + last "Shehu Maisango"
-  const { data: profs } = await sb.from("profiles").select("id, first_name, last_name").eq("role", "student");
   const want = norm(studentName).split(" ").sort().join(" ");
   const hits = (profs || []).filter(p => norm((p.first_name || "") + " " + (p.last_name || "")).split(" ").sort().join(" ") === want);
   if(hits.length !== 1) return null;
@@ -108,6 +107,9 @@ export async function runSync(page, portal, sb, log){
   // Safety: do nothing until the sync tables exist, so nothing is ever written twice.
   const probe = await sb.from("askuni_applications").select("askuni_app_id").limit(1);
   if(probe.error){ log && log("warn", "sync: tables not ready yet (" + probe.error.message + ") — skipping"); return { skipped: true }; }
+  // every student once per run, instead of once per AskUni row
+  const { data: profs, error: profErr } = await sb.from("profiles").select("id, first_name, last_name").eq("role", "student");
+  if(profErr){ log && log("warn", "sync: couldn't read Orbuni students (" + profErr.message + ") — skipping"); return { skipped: true }; }
   const event = (kind, detail) => sb.from("askuni_events").insert({ kind, detail }).then(() => {}, () => {});
 
   // ---- applications
@@ -118,7 +120,7 @@ export async function runSync(page, portal, sb, log){
     const program = col(apps.headers, r, "PROGRAM") || "";
     const status = col(apps.headers, r, "STATUS") || "";
     const { data: prev } = await sb.from("askuni_applications").select("askuni_status, application_id, mapped_status").eq("askuni_app_id", askId).maybeSingle();
-    const m = await matchApplication(sb, s.name, program);
+    const m = await matchApplication(sb, s.name, program, profs || []);
     const application_id = (m && m.application && m.application.id) || (prev && prev.application_id) || null;
     const row = { askuni_app_id: askId, student_name: s.name, program, program_code: s.code, apply_code: s.apply_code, askuni_status: status,
       season: col(apps.headers, r, "SEASON") || null, created_on: col(apps.headers, r, "CREATED DATE") || null,
