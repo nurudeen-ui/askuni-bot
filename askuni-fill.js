@@ -1,4 +1,4 @@
-// askuni-fill.js — version 4.0 (2 Oct 2026): one engine for every dropdown, date and upload (strict check, several ways to fill, label variants, field inventory in the log)
+// askuni-fill.js — version 4.1 (2 Oct 2026): one engine for every dropdown, date and upload (strict check, several ways to fill, label variants, field inventory in the log) ; re-checks text boxes before Next
 // Orbuni ⇄ AskUni — the part that actually fills AskUni's "Add Student User"
 // wizard. Kept separate from the web server (index.js) so it can be tested
 // against a local copy of the wizard without touching the real site.
@@ -103,15 +103,49 @@ async function firstVisible(loc){
 }
 
 // ------------------------------------------------------------ text boxes
-export async function fillText(page, label, value, log){
-  if(value == null || value === "") return { ok:false, reason:"no value in Orbuni" };
+async function locateText(page, label){
   const scope = await scopeOf(page);
   let el = await firstVisible(scope.getByLabel(new RegExp("^\\s*" + esc(label) + "\\s*\\*?\\s*$", "i")));
   if(!el){ const box = await fieldBox(scope, label); if(box) el = await firstVisible(box.locator("input:not([type=hidden]):not([type=file]), textarea")); }
-  if(!el){ log && log("warn", `${label}: box not found`); return { ok:false, reason:"box not found" }; }
+  return el;
+}
+// Every text box we filled in the current step, so a last sweep can catch any the page cleared afterwards.
+let typedBoxes = [];
+export function resetTyped(){ typedBoxes = []; }
+async function typeIn(el, value){
   await el.fill(String(value), { timeout: 8000 });
+  let now = await el.inputValue().catch(() => String(value));
+  if(String(now).trim() === "" ){
+    await el.click({ timeout: 3000 }).catch(() => {});
+    await el.press("Control+A").catch(() => {});
+    await el.pressSequentially(String(value), { delay: 15 }).catch(() => {});
+    now = await el.inputValue().catch(() => String(value));
+  }
+  return String(now).trim() !== "";
+}
+export async function fillText(page, label, value, log){
+  if(value == null || value === "") return { ok:false, reason:"no value in Orbuni" };
+  const el = await locateText(page, label);
+  if(!el){ log && log("warn", `${label}: box not found`); return { ok:false, reason:"box not found" }; }
+  const kept = await typeIn(el, value);
+  typedBoxes.push({ label, value });
+  if(!kept){ log && log("warn", `${label}: typed but the box stayed empty`); return { ok:false, reason:"box stayed empty" }; }
   log && log("info", `${label}: filled`);
   return { ok:true };
+}
+// Last look before Next: the page sometimes clears boxes after a dropdown choice. Put back anything that went empty.
+export async function sweepTyped(page, log){
+  for(const t of typedBoxes){
+    try{
+      const el = await locateText(page, t.label);
+      if(!el) continue;
+      const now = String(await el.inputValue().catch(() => t.value)).trim();
+      if(now === ""){
+        const ok = await typeIn(el, t.value);
+        log && log(ok ? "info" : "warn", ok ? `${t.label}: had been cleared by the page, filled again` : `${t.label}: still empty after a second try`);
+      }
+    }catch(e){}
+  }
 }
 
 // ------------------------------------------------------------ dropdowns
@@ -600,6 +634,7 @@ export async function step1(page, d, log){
   await nextStep(page, 1, log);
 }
 export async function step2(page, d, log){
+  resetTyped();
   const nat = countryName(d.nationality), res = countryName(d.country) || nat, birth = countryName(d.country_of_birth) || nat;
   const text = (variants, rx, v) => fillAny(page, variants, rx, (l) => fillText(page, l, v, log), log);
   const date = (variants, rx, v) => fillAny(page, variants, rx, (l) => fillDate(page, l, v, log), log);
@@ -615,6 +650,7 @@ export async function step2(page, d, log){
   await text(["Father Name", "Father's Name", "Father Full Name"], /father/i, d.father_name);
   await date(["Passport Date of Expire", "Passport Expiry Date", "Passport Expiration Date", "Date of Expire", "Expiry Date"], /expir/i, d.passport_expiry);
   await date(["Passport Date of Issue", "Passport Issue Date", "Date of Issue", "Issue Date"], /issue/i, d.passport_issue_date);
+  await sweepTyped(page, log);
   await nextStep(page, 2, log);
 }
 export async function step3(page, d, log){
