@@ -295,79 +295,17 @@ app.post("/submissions/:sessionId/cancel", requireInternalAuth, async (req, res)
   res.json({ ok: true });
 });
 
-// Check AskUni for decisions and commissions.
+// Check AskUni for decisions and commissions: runs the same sync as the 15-minute timer
+// (sync.js), so a button press can never write commissions or statuses differently from it.
+// It never closes a form someone is holding open for "Carry on".
 app.post("/check-responses", requireInternalAuth, async (_req, res) => {
-  if(!(await makeRoom())) return res.status(409).json({ error: "The AskUni helper is busy sending a student — try again in a minute." });
-  let browser = null;
-  try{
-    browser = await launch();
-    const { context, page } = await newPage(browser);
-    await ensureLogin(page, context, () => {});
-    await page.goto(PORTAL + "/application/commissions/?only_my_commissions=true&activeTab=all", { waitUntil: "domcontentloaded", timeout: 30000 });
-    const found = await readAskUniResponses(page);
-    let written = 0;
-    for(const item of found){
-      if(item.kind === "decision" && item.application_id){
-        const patch = { decision: item.status, decision_at: new Date().toISOString(), askuni_synced_at: new Date().toISOString() };
-        if(["offer_received", "rejected"].includes(item.status)) patch.status = item.status;
-        await sb.from("applications").update(patch).eq("id", item.application_id); written++;
-      }
-      if(item.kind === "commission"){
-        const desc = "AskUni — " + item.description;
-        const { data: exists } = await sb.from("finance_transactions").select("id").eq("description", desc).eq("amount", item.amount).limit(1);
-        if(!exists || !exists.length){
-          await sb.from("finance_transactions").insert({ kind: "income", direction: "in", amount: item.amount, currency: item.currency || "USD",
-            application_id: item.application_id || null, description: desc, occurred_on: new Date().toISOString().slice(0, 10), source: "automatic" });
-          written++;
-        }
-      }
-    }
-    res.json({ ok: true, found: found.length, new: written });
-  }catch(e){
-    console.error("[check-responses] FAILED: " + String(e && e.stack || e));
-    res.status(500).json({ error: String(e && e.message || e).split("\n")[0] });
-  }finally{
-    if(browser){ try{ await browser.close(); }catch(_){} }
-  }
+  if(LIVE.size) return res.status(409).json({ error: "The AskUni helper is busy sending a student — try again in a minute." });
+  const r = await scanNow({ discovery: false });
+  if(r.error) return res.status(500).json({ error: r.error });
+  if(r.skipped) return res.status(409).json({ error: "Already checking AskUni (" + r.skipped + ") — try again in a minute." });
+  const st = r.sync || {};
+  res.json({ ok: true, found: st.applications || 0, new: (st.changed || 0) + (st.finance_new || 0), sync: st });
 });
-
-async function readAskUniResponses(page){
-  // The commissions list may be a real <table> or a grid of rows; wait for either.
-  const table = page.locator("table").first();
-  const grid = page.locator("[role=grid], [role=table]").first();
-  await Promise.race([table.waitFor({ timeout: 25000 }), grid.waitFor({ timeout: 25000 })]).catch(() => {});
-  const useTable = await table.count();
-  const root = useTable ? table : grid;
-  if(!(await root.count())) return [];
-  const headers = (await root.locator(useTable ? "thead th" : "[role=columnheader]").allTextContents()).map(h => h.trim());
-  const rows = await root.locator(useTable ? "tbody tr" : "[role=row]:has([role=cell])").all();
-  const results = [];
-  for(const row of rows){
-    const cells = (await row.locator(useTable ? "td" : "[role=cell]").allTextContents()).map(c => c.trim());
-    const by = {}; headers.forEach((h, i) => { by[h] = cells[i]; });
-    const studentName = by["Student"]; if(!studentName) continue;
-    const st = by["Application Status"];
-    const amountRaw = (by["Amount"] || "").replace(/[^0-9.]/g, "");
-    const pctRaw = (by["Commission %"] || by["Commission"] || "").replace(/[^0-9.]/g, "");
-    // match the student by BOTH names exactly (a one-word name is not enough to be sure)
-    const [first, ...rest] = studentName.trim().split(/\s+/);
-    let application_id = null;
-    if(first && rest.length){
-      const { data: matched } = await sb.from("applications").select("id, profiles!inner(first_name, last_name)")
-        .ilike("profiles.first_name", first).ilike("profiles.last_name", rest.join(" ")).limit(2);
-      if(matched && matched.length === 1) application_id = matched[0].id;
-    }
-    if(st) results.push({ kind: "decision", application_id, status: mapStatus(st) });
-    if(amountRaw) results.push({ kind: "commission", application_id, amount: parseFloat(amountRaw), currency: "USD", description: studentName + (pctRaw ? " (" + pctRaw + "%)" : "") });
-  }
-  return results;
-}
-function mapStatus(s){
-  const t = s.toLowerCase();
-  if(t.includes("offer")) return "offer_received";
-  if(t.includes("declin") || t.includes("reject")) return "rejected";
-  return s;
-}
 
 // ------------------------------------------------ reading AskUni on a timer (read only)
 // Every SCAN_MINUTES (default 15) the bot opens AskUni, reads the student list, applications,
@@ -376,7 +314,7 @@ function mapStatus(s){
 const SCAN_MINUTES = Number(env("SCAN_MINUTES", "15"));
 let SCANNING = false;
 let LAST_DISCOVERY = 0;
-async function scanNow(){
+async function scanNow(opts = {}){
   if(SCANNING) return { skipped: "already reading AskUni" };
   if(LIVE.size) return { skipped: "a student is being sent" };
   SCANNING = true; let browser = null;
@@ -388,7 +326,7 @@ async function scanNow(){
     const stats = await runSync(page, PORTAL, sb, log);
     // the page-recording scan is only for discovery: once after start, then once a day
     let n = 0;
-    if(Date.now() - LAST_DISCOVERY > 24 * 3600e3){ n = await runScan(page, PORTAL, sb, log); LAST_DISCOVERY = Date.now(); }
+    if(opts.discovery !== false && Date.now() - LAST_DISCOVERY > 24 * 3600e3){ n = await runScan(page, PORTAL, sb, log); LAST_DISCOVERY = Date.now(); }
     return { ok: true, sync: stats, pages: n };
   }catch(e){
     console.error("[scan] FAILED: " + String(e && e.message || e).split("\n")[0]);
