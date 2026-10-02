@@ -13,7 +13,8 @@ export function mapStatus(raw){
   if(!t) return null;
   if(/missing doc|document/.test(t)) return "docs_needed";
   if(/reject|declin|denied|not accepted/.test(t)) return "rejected";
-  if(/withdraw|cancel/.test(t)) return "withdrawn";
+  if(/withdraw|cancel|dropp/.test(t)) return "withdrawn";
+  if(/acceptance/.test(t)) return "offer_accepted";
   if(/enrol|register/.test(t)) return "enrolled";
   if(/visa/.test(t)) return "visa_stage";
   if(/deposit|paid/.test(t)) return "deposit_paid";
@@ -26,8 +27,13 @@ const LATER = new Set(["offer_received", "offer_accepted", "deposit_paid", "visa
 // "USMAN SHEHU MAISANGO Xr1bkjLG9F NU2026-82334"  ->  { name, code, apply_code }
 export function splitStudentCell(cell){
   const t = String(cell || "").replace(/\s+/g, " ").trim();
-  const m = /^(.*?)\s+([A-Za-z0-9]{8,12})\s+([A-Z]{1,5}\d{4}-\d+)\s*$/.exec(t);
-  return m ? { name: m[1], code: m[2], apply_code: m[3] } : { name: t, code: null, apply_code: null };
+  const words = t.split(" "); const name = [];
+  for(const w of words){
+    if(!/^[A-Z][A-Z'’.\-]*$/.test(w) || w === "ID") break;   // a code (digits / mixed case) or "ID" ends the name
+    name.push(w);
+  }
+  const rest = words.slice(name.length).join(" ");
+  return { name: (name.length ? name.join(" ") : t), code: rest || null, apply_code: null };
 }
 export const appIdFromLinks = (links) => {
   for(const l of links || []){ const m = /\/application\/detail\/(\d+)\//.exec(l || ""); if(m) return Number(m[1]); }
@@ -150,22 +156,26 @@ export async function runSync(page, portal, sb, log){
     const remaining = money(col(com.headers, r, "REMAINING"));
     const status = col(com.headers, r, "STATUS") || "";
     const student = col(com.headers, r, "STUDENT") || "";
-    const paid = /^paid$/i.test(status.trim()) || (remaining != null && remaining <= 0);
+    const received = remaining == null ? (/^paid$/i.test(status.trim()) ? amount : 0) : Math.max(0, Math.round((amount - remaining) * 100) / 100);
     const key = { askuni_app_id: askId, amount, commission_pct: pct };
-    const { data: prev } = await sb.from("askuni_commissions").select("finance_tx_id, status, remaining").match(key).maybeSingle();
+    const { data: prev } = await sb.from("askuni_commissions").select("finance_tx_id").match(key).maybeSingle();
     const { data: link } = await sb.from("askuni_applications").select("application_id").eq("askuni_app_id", askId).maybeSingle();
     let txId = prev && prev.finance_tx_id;
-    if(!txId){
-      const ins = await sb.from("finance_transactions").insert({ kind: "income", direction: "in", amount, currency: "USD", status: paid ? "paid" : "pending",
-        application_id: (link && link.application_id) || null, description: `AskUni commission — ${student} (${pct}%) · application ${askId}`,
-        occurred_on: new Date().toISOString().slice(0, 10), source: "automatic" }).select("id").single();
-      if(ins.error){ log && log("warn", "sync: couldn't record a commission: " + ins.error.message); continue; }
-      txId = ins.data.id; stats.finance_new++;
-    }else if(paid && prev.status !== status){
-      await sb.from("finance_transactions").update({ status: "paid" }).eq("id", txId);
+    // The Finance dashboard counts every income row, so a commission only goes in once AskUni shows money paid.
+    if(received > 0){
+      const desc = `AskUni commission — ${student} (${pct}%) · application ${askId}`;
+      if(!txId){
+        const ins = await sb.from("finance_transactions").insert({ kind: "income", direction: "in", amount: received, currency: "USD", status: "paid",
+          application_id: (link && link.application_id) || null, description: desc,
+          occurred_on: new Date().toISOString().slice(0, 10), source: "automatic" }).select("id").single();
+        if(ins.error){ log && log("warn", "sync: couldn't record a commission: " + ins.error.message); continue; }
+        txId = ins.data.id; stats.finance_new++;
+      }else{
+        await sb.from("finance_transactions").update({ amount: received, status: "paid" }).eq("id", txId);
+      }
     }
     await sb.from("askuni_commissions").upsert({ ...key, student_name: student, app_status: col(com.headers, r, "APPLICATION STATUS") || null,
-      status, remaining, finance_tx_id: txId, application_id: (link && link.application_id) || null, last_seen: new Date().toISOString() }, { onConflict: "askuni_app_id,amount,commission_pct" });
+      status, remaining, finance_tx_id: txId || null, application_id: (link && link.application_id) || null, last_seen: new Date().toISOString() }, { onConflict: "askuni_app_id,amount,commission_pct" });
     stats.commissions++;
   }
   log && log("info", `sync: ${JSON.stringify(stats)}`);
