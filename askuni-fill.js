@@ -1,4 +1,4 @@
-// askuni-fill.js — version 3.1 (2 Oct 2026): step detection only counts the Add Student pop-up
+// askuni-fill.js — version 3.2 (2 Oct 2026): step detection only counts the Add Student pop-up; dropdowns have keyboard + markup fallbacks
 // Orbuni ⇄ AskUni — the part that actually fills AskUni's "Add Student User"
 // wizard. Kept separate from the web server (index.js) so it can be tested
 // against a local copy of the wizard without touching the real site.
@@ -137,12 +137,17 @@ export async function pickOption(page, label, wanted, log){
   const typeable = await control.evaluate(e => e.tagName === "INPUT" && !e.readOnly).catch(() => false);
   if(typeable){ await control.fill(""); await control.pressSequentially(wanted[0].slice(0, 24), { delay: 25 }); }
 
-  const options = page.locator('[role=option], [role=listbox] li, .MuiAutocomplete-option, ul[role=menu] li');
+  const options = page.locator('[role=option], [role=listbox] li, .MuiAutocomplete-option, ul[role=menu] li, .MuiMenuItem-root, [id*="-option-"], [class*="select__option"], [class*="dropdown-item"]');
   try{ await options.first().waitFor({ state:"visible", timeout: 5000 }); }catch(e){
     // A MUI Select with no list yet: type-ahead on the focused control.
     await control.press("Enter").catch(() => {});
     try{ await options.first().waitFor({ state:"visible", timeout: 2500 }); }catch(_){
       await page.keyboard.press("Escape").catch(() => {});
+      // Last resorts: drive the control with the keyboard (open it, type the first
+      // letters, Enter), then trust only what the box itself shows afterwards.
+      const kb = await pickByKeyboard(page, box, control, wanted, log, label);
+      if(kb) return kb;
+      await describeField(box, log, label);
       log && log("warn", `${label}: no list of choices opened`);
       return { ok:false, reason:"no list opened" };
     }
@@ -160,6 +165,38 @@ export async function pickOption(page, label, wanted, log){
   await opt.click({ timeout: 8000 });
   log && log("info", `${label}: chose "${hit.trim()}"`);
   return { ok:true, chose:hit.trim() };
+}
+// What the box shows now (its visible text and input values), lower-cased.
+async function shownIn(box){
+  return await box.evaluate((el) => {
+    const vals = Array.from(el.querySelectorAll("input,select,textarea")).map(i => i.value || "").join(" ");
+    return ((el.innerText || "") + " " + vals).toLowerCase();
+  }).catch(() => "");
+}
+// Keyboard fallback for dropdowns that never show a list we can see.
+async function pickByKeyboard(page, box, control, wanted, log, label){
+  const targets = wanted.map(w => norm(w)).filter(Boolean);
+  const done = async () => { const t = norm(await shownIn(box)); return targets.some(w => t.includes(w)); };
+  for(const key of ["Enter", "ArrowDown", "Space"]){
+    try{
+      await control.focus().catch(() => {});
+      await control.press(key).catch(() => {});
+      await page.waitForTimeout(400);
+      await page.keyboard.type(String(wanted[0]).slice(0, 4), { delay: 60 });
+      await page.keyboard.press("Enter").catch(() => {});
+      await page.waitForTimeout(500);
+      if(await done()){ log && log("info", `${label}: chose "${wanted[0]}" (keyboard)`); return { ok:true, chose:String(wanted[0]) }; }
+      await page.keyboard.press("Escape").catch(() => {});
+    }catch(e){}
+  }
+  return null;
+}
+// When a field cannot be filled, record a short look at its markup so the next fix is exact.
+async function describeField(box, log, label){
+  try{
+    const html = await box.evaluate((el) => el.outerHTML.replace(/\s+/g, " ").replace(/data:[^"']{20,}/g, "data:…").slice(0, 700));
+    log && log("info", `${label}: field markup → ${html}`);
+  }catch(e){}
 }
 function bestMatch(list, wanted){
   const L = list.map(t => ({ raw:t, n:norm(t) })).filter(x => x.n);
