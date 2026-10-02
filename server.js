@@ -18,6 +18,7 @@ import { createClient } from "@supabase/supabase-js";
 import { chromium } from "playwright-core";
 import * as F from "./askuni-fill.js";
 import { runScan } from "./scan.js";
+import { runSync } from "./sync.js";
 
 const env = (k, d) => process.env[k] ?? d;
 const PORT = env("PORT", 3000);
@@ -374,6 +375,7 @@ function mapStatus(s){
 // Apply or Delete, and it steps aside whenever a student is being sent.
 const SCAN_MINUTES = Number(env("SCAN_MINUTES", "15"));
 let SCANNING = false;
+let LAST_DISCOVERY = 0;
 async function scanNow(){
   if(SCANNING) return { skipped: "already reading AskUni" };
   if(LIVE.size) return { skipped: "a student is being sent" };
@@ -382,8 +384,12 @@ async function scanNow(){
     browser = await launch();
     const { context, page } = await newPage(browser);
     await ensureLogin(page, context, () => {});
-    const n = await runScan(page, PORTAL, sb, (lvl, t) => console.log("[scan] " + t));
-    return { ok: true, pages: n };
+    const log = (lvl, t) => console.log("[sync] " + t);
+    const stats = await runSync(page, PORTAL, sb, log);
+    // the page-recording scan is only for discovery: once after start, then once a day
+    let n = 0;
+    if(Date.now() - LAST_DISCOVERY > 24 * 3600e3){ n = await runScan(page, PORTAL, sb, log); LAST_DISCOVERY = Date.now(); }
+    return { ok: true, sync: stats, pages: n };
   }catch(e){
     console.error("[scan] FAILED: " + String(e && e.message || e).split("\n")[0]);
     return { error: String(e && e.message || e).split("\n")[0] };
