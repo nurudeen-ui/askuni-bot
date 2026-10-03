@@ -103,11 +103,24 @@ async function firstVisible(loc){
 }
 
 // ------------------------------------------------------------ text boxes
+// Two ways to find a box: the label's own link (getByLabel) and the box drawn under the label
+// text. On AskUni's step 2 the link points somewhere else for some boxes (the bot "filled" them
+// but the boxes on screen stayed empty), so when the two disagree the box on screen wins.
+let lastPick = "";
 async function locateText(page, label){
   const scope = await scopeOf(page);
-  let el = await firstVisible(scope.getByLabel(new RegExp("^\\s*" + esc(label) + "\\s*\\*?\\s*$", "i")));
-  if(!el){ const box = await fieldBox(scope, label); if(box) el = await firstVisible(box.locator("input:not([type=hidden]):not([type=file]), textarea")); }
-  return el;
+  const byLink = await firstVisible(scope.getByLabel(new RegExp("^\\s*" + esc(label) + "\\s*\\*?\\s*$", "i")));
+  const box = await fieldBox(scope, label);
+  // only trust "the box under the label" when that block holds exactly one box
+  const inBox = box ? box.locator("input:not([type=hidden]):not([type=file]), textarea") : null;
+  const underLabel = inBox && (await inBox.count()) === 1 ? await firstVisible(inBox) : null;
+  lastPick = "";
+  if(byLink && underLabel){
+    const h = await underLabel.elementHandle().catch(() => null);
+    const same = h ? await byLink.evaluate((a, b) => a === b, h).catch(() => true) : true;
+    if(!same){ lastPick = " (used the box under the label — AskUni's label link pointed to another box)"; return underLabel; }
+  }
+  return byLink || underLabel;
 }
 // Every text box we filled in the current step, so a last sweep can catch any the page cleared afterwards.
 let typedBoxes = [];
@@ -131,7 +144,7 @@ export async function fillText(page, label, value, log){
   const kept = await typeIn(el, value);
   typedBoxes.push({ label, value });
   if(!kept){ log && log("warn", `${label}: typed but the box stayed empty`); return { ok:false, reason:"box stayed empty" }; }
-  log && log("info", `${label}: filled`);
+  log && log("info", `${label}: filled${lastPick}`);
   return { ok:true };
 }
 // Last look before Next: the page sometimes clears boxes after a dropdown choice. Put back anything that went empty.
@@ -151,6 +164,19 @@ export async function sweepTyped(page, log){
     }catch(e){}
   }
   return refilled;
+}
+// When Next fails, write down for each typed box what is really in it, so the log shows the cause.
+async function describeTyped(page, log){
+  if(!log) return;
+  const scope = await scopeOf(page);
+  for(const t of typedBoxes){
+    try{
+      const box = await fieldBox(scope, t.label);
+      const el = box ? await firstVisible(box.locator("input:not([type=hidden]):not([type=file]), textarea")) : null;
+      const info = el ? await el.evaluate((e) => ({ id: e.id, name: e.name, v: e.value })) : null;
+      log("info", `check ${t.label}: ` + (info ? `box on screen id="${info.id}" name="${info.name}" holds ${info.v ? "text" : "NOTHING"}` : "no box found under the label"));
+    }catch(e){}
+  }
 }
 // Types like a person (click, select all, key by key, then leave the box), for forms that ignore a pasted value.
 async function typeKeys(el, value){
@@ -623,6 +649,7 @@ export async function nextStep(page, fromStep, log, retried = false){
     log && log("info", "pressing Next again after filling the emptied boxes");
     return nextStep(page, fromStep, log, true);
   }
+  await describeTyped(page, log);
   const errors = await readErrors(page);
   if(errors.length) throw new StepBlocked(STEP_NAMES[fromStep], errors, "AskUni wants: " + errors.map(e => e.field + " — " + e.message).join("; "));
   const said = await whatPageSays(page);
