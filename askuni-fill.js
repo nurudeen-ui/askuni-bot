@@ -114,6 +114,7 @@ let typedBoxes = [];
 export function resetTyped(){ typedBoxes = []; }
 async function typeIn(el, value){
   await el.fill(String(value), { timeout: 8000 });
+  await commit(el);
   let now = await el.inputValue().catch(() => String(value));
   if(String(now).trim() === "" ){
     await el.click({ timeout: 3000 }).catch(() => {});
@@ -135,17 +136,33 @@ export async function fillText(page, label, value, log){
 }
 // Last look before Next: the page sometimes clears boxes after a dropdown choice. Put back anything that went empty.
 export async function sweepTyped(page, log){
+  await page.waitForTimeout(1000);   // let AskUni finish redrawing the form after the country lists
+  let refilled = 0;
   for(const t of typedBoxes){
     try{
       const el = await locateText(page, t.label);
       if(!el) continue;
       const now = String(await el.inputValue().catch(() => t.value)).trim();
       if(now === ""){
-        const ok = await typeIn(el, t.value);
+        const ok = await typeKeys(el, t.value);
+        if(ok) refilled++;
         log && log(ok ? "info" : "warn", ok ? `${t.label}: had been cleared by the page, filled again` : `${t.label}: still empty after a second try`);
       }
     }catch(e){}
   }
+  return refilled;
+}
+// Types like a person (click, select all, key by key, then leave the box), for forms that ignore a pasted value.
+async function typeKeys(el, value){
+  await el.click({ timeout: 3000 }).catch(() => {});
+  await el.press("Control+A").catch(() => {});
+  await el.pressSequentially(String(value), { delay: 20 }).catch(() => {});
+  await commit(el);
+  return String(await el.inputValue().catch(() => "")).trim() !== "";
+}
+// Tell the page the box is finished (some forms only save a value on "change" / leaving the box).
+async function commit(el){
+  await el.evaluate((e) => { e.dispatchEvent(new Event("change", { bubbles: true })); e.dispatchEvent(new Event("blur")); }).catch(() => {});
 }
 
 // ------------------------------------------------------------ dropdowns
@@ -584,7 +601,7 @@ async function whatPageSays(page){
     return { alerts: alerts.slice(0, 4), errs: errs.slice(0, 4), dialog: dlg.slice(-1)[0] || "" };
   }).catch(() => ({ alerts: [], errs: [], dialog: "" }));
 }
-export async function nextStep(page, fromStep, log){
+export async function nextStep(page, fromStep, log, retried = false){
   const scope = await scopeOf(page);
   const next = await firstVisible(scope.getByRole("button", { name: /^\s*next\s*$/i }));
   if(!next) throw new StepBlocked(STEP_NAMES[fromStep], [], "The Next button isn't on screen.");
@@ -599,6 +616,12 @@ export async function nextStep(page, fromStep, log){
     const s = await scopeOf(page);
     if(await firstVisible(mark(s, page))){ log && log("info", `moved on to ${STEP_NAMES[fromStep + 1]}`); return; }
     await page.waitForTimeout(400);
+  }
+  // AskUni sometimes empties boxes we typed (it showed "This field is required" under them).
+  // Put them back key by key and press Next once more before asking a person.
+  if(!retried && typedBoxes.length && (await sweepTyped(page, log)) > 0){
+    log && log("info", "pressing Next again after filling the emptied boxes");
+    return nextStep(page, fromStep, log, true);
   }
   const errors = await readErrors(page);
   if(errors.length) throw new StepBlocked(STEP_NAMES[fromStep], errors, "AskUni wants: " + errors.map(e => e.field + " — " + e.message).join("; "));
@@ -644,6 +667,8 @@ export async function step2(page, d, log){
   await pick(["Country of Birth", "Birth Country", "Place of Birth"], /country\s*of\s*birth|birth\s*country|place\s*of\s*birth/i, countryAliases(birth));
   await pick(["Country of Residence", "Residence Country", "Country"], /residen|^country$/i, countryAliases(res));
   await pick(["Nationality", "Citizenship"], /national|citizen/i, countryAliases(nat).concat(d.nationality ? [d.nationality] : []));
+  // choosing a country redraws part of the form a moment later; typing before that gets wiped
+  await page.waitForTimeout(1500);
   await text(["City of Residence", "City"], /city/i, d.city);
   await text(["Address", "Home Address", "Residence Address"], /address/i, d.address_line);
   await text(["Mother Name", "Mother's Name", "Mother Full Name"], /mother/i, d.mother_name);
