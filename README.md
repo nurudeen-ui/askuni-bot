@@ -63,6 +63,16 @@ now asks for it.
 | `POST /submissions/:id/continue` `{submission_id, application_id}` | Carries on after the student's details were fixed. |
 | `POST /submissions/:id/cancel` | Stops and closes the browser. |
 | `POST /check-responses` | Reads AskUni's list for university decisions and commissions. |
+| `POST /dry-run` `{application_id, check_login?}` | What a send *would* do, step by step, without typing anything into AskUni. Checks every field and downloads and checks every document (PDF/JPG/PNG). With `check_login: true` it also logs in to AskUni and opens the student list (read only). |
+
+## Checks before every send
+
+Since AskUni creates the student's AskUni account as soon as step 1 is accepted, every send now
+checks the student's Orbuni file first (`preflight.js`). A missing or unreadable passport,
+diploma or transcript, a file that isn't PDF/JPG/PNG, or an empty required field stops the send
+*before* anything is typed into AskUni, with a plain message saying what to fix. If AskUni signs
+the bot out after step 1, the bot stops instead of starting the form again, because starting
+again would create a second AskUni student. `npm test` runs the checks' tests.
 
 The portal never calls these directly. It goes through the Supabase edge function
 `askuni-proxy`, which checks that the staff member is allowed to manage applications.
