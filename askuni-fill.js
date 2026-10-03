@@ -663,14 +663,35 @@ export async function nextStep(page, fromStep, log, retried = false){
   await page.waitForTimeout(2500);
   for(let i = 0; i < 20 && !(await next.isEnabled().catch(() => true)); i++) await page.waitForTimeout(500);
   await next.scrollIntoViewIfNeeded().catch(() => {});
+  // AskUni sometimes refuses a step without saying so on screen. Record what its server answers
+  // after Next (requests that fail) and any message that pops up and disappears while we wait.
+  const answers = [], flashes = new Set();
+  const onResp = async (r) => {
+    try{
+      const t = r.request().resourceType();
+      if(!["xhr", "fetch"].includes(t)) return;
+      const st = r.status();
+      let body = "";
+      if(st >= 400 || r.request().method() !== "GET") body = (await r.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 220);
+      if(st >= 400 || /error|invalid|required|exist|already|must/i.test(body))
+        answers.push(`${r.request().method()} ${new URL(r.url()).pathname} → ${st} ${body}`);
+    }catch(_){}
+  };
+  page.on("response", onResp);
   await next.click();
   const mark = STEP_MARK[fromStep + 1];
   const deadline = Date.now() + 30000;   // AskUni creates the account before it shows the next step
+  try{
   while(Date.now() < deadline){
+    const said0 = await whatPageSays(page);
+    for(const a of said0.alerts) if(!/^askuni \| search/i.test(a)) flashes.add(a.slice(0, 160));
     const s = await scopeOf(page);
     if(await firstVisible(mark(s, page))){ log && log("info", `moved on to ${STEP_NAMES[fromStep + 1]}`); return; }
     await page.waitForTimeout(400);
   }
+  }finally{ page.off("response", onResp); }
+  if(answers.length) log && log("warn", "AskUni's server answered: " + answers.slice(0, 4).join(" | "));
+  if(flashes.size) log && log("warn", "AskUni flashed: " + Array.from(flashes).slice(0, 4).join(" | "));
   // AskUni sometimes empties boxes we typed (it showed "This field is required" under them).
   // Put them back key by key and press Next once more before asking a person.
   if(!retried && typedBoxes.length && (await sweepTyped(page, log)) > 0){
@@ -681,7 +702,7 @@ export async function nextStep(page, fromStep, log, retried = false){
   const errors = await readErrors(page);
   if(errors.length) throw new StepBlocked(STEP_NAMES[fromStep], errors, "AskUni wants: " + errors.map(e => e.field + " — " + e.message).join("; "));
   const said = await whatPageSays(page);
-  const words = [...said.alerts, ...said.errs].join(" | ");
+  const words = [...flashes, ...answers.map(a => "server: " + a), ...said.alerts, ...said.errs].join(" | ");
   log && log("info", `AskUni's screen after Next → alerts: [${said.alerts.join(" | ")}] errors: [${said.errs.join(" | ")}] pop-up: ${said.dialog}`);
   throw new StepBlocked(STEP_NAMES[fromStep], [],
     words ? ("AskUni didn't open the next step. It says: " + words.slice(0, 280))
