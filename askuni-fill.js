@@ -407,9 +407,33 @@ export async function fillPhone(page, label, phone, log){
   await input.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
   await input.press("Backspace").catch(() => {});
   await input.pressSequentially(intl, { delay: 35 });
-  const got = (await input.inputValue().catch(() => "")).replace(/\D/g, "");
+  let got = (await input.inputValue().catch(() => "")).replace(/\D/g, "");
   const want = intl.replace(/\D/g, "");
-  const ok = got.endsWith(want.slice(-7));
+  // AskUni's phone box keeps its own country code (+90 Türkiye) and drops a typed "+234…".
+  // Then pick the country from the box's flag list (by dialling code) and type the rest.
+  if(got !== want && !got.startsWith(want.slice(0, 3))){
+    try{
+      const flag = await firstVisible(box.locator('.selected-flag, .flag-dropdown, [class*="flag" i][role="button"], button[aria-haspopup]'));
+      if(flag){
+        await flag.click({ timeout: 5000 });
+        await page.waitForTimeout(500);
+        const code = await page.evaluate((w) => {
+          const codes = Array.from(document.querySelectorAll("[data-dial-code]")).map(e => e.getAttribute("data-dial-code")).filter(Boolean);
+          return codes.filter(c => w.startsWith(c)).sort((a, b) => b.length - a.length)[0] || null;
+        }, want);
+        if(code){
+          await page.locator(`[data-dial-code="${code}"]`).first().click({ timeout: 5000 });
+          await input.click({ timeout: 5000 }).catch(() => {});
+          await input.press("End").catch(() => {});
+          for(let i = 0; i < 20; i++) await input.press("Backspace").catch(() => {});
+          await input.pressSequentially(want.slice(code.length), { delay: 35 });
+          got = (await input.inputValue().catch(() => "")).replace(/\D/g, "");
+          log && log("info", `${label}: chose the +${code} country code`);
+        }else await flag.click({ timeout: 3000 }).catch(() => {});   // close the list (Escape could close the whole form)
+      }
+    }catch(_){}
+  }
+  const ok = got === want || got.endsWith(want.slice(-9)) && got.startsWith(want.slice(0, 3));
   log && log(ok ? "info" : "warn", `${label}: ${ok ? "filled" : "typed, but the box shows something else"}`);
   return { ok };
 }
