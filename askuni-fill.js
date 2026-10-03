@@ -766,8 +766,38 @@ export async function step3(page, d, log){
   await doc(["Transcript", "Transcripts", "Academic Transcript"], /transcript/i, d.files.transcript, 2);
   await nextStep(page, 3, log);
 }
+// The programme search box, in the Add Student wizard or in Add New Application. AskUni's text
+// "Type Interested Program and Press Enter" isn't always a real placeholder, so try several ways.
+export async function programSearch(page){
+  const dlg = page.getByRole("dialog").filter({ hasText: /interested program|add new application|apply to university/i }).last();
+  const scope = (await dlg.count()) ? dlg : page.locator("body");
+  for(const loc of [
+    scope.getByPlaceholder(/interested program|press enter/i),
+    scope.getByRole("textbox", { name: /interested program|press enter/i }),
+    scope.getByLabel(/interested program|press enter/i),
+    scope.locator('input[type="search"]'),
+    scope.locator('input[placeholder*="rogram" i]'),
+    // last resort: the one plain text box in the window (the filters on the left are dropdowns)
+    scope.locator('input:not([type=hidden]):not([type=file]):not([type=checkbox]):not([type=radio]):not([role=combobox]):not([readonly]):not([aria-autocomplete])'),
+  ]){
+    const el = await firstVisible(loc).catch(() => null);
+    if(el) return el;
+  }
+  return null;
+}
+// what buttons and choices the open window offers (for the log, when a step goes wrong)
+async function buttonsShown(page){
+  return await page.evaluate(() => {
+    const d = Array.from(document.querySelectorAll('[role="dialog"]')).pop() || document.body;
+    return Array.from(d.querySelectorAll('button, [role="button"], [role="option"]'))
+      .filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+      .map(e => (e.innerText || e.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 25).join(" | ");
+  }).catch(() => "");
+}
 export async function step4(page, d, log){
-  const box = page.getByPlaceholder(/Type Interested Program/i);
+  const box = await programSearch(page);
+  if(!box) throw new StepBlocked(STEP_NAMES[4], [], "The programme search box isn't on screen.");
+  await box.click().catch(() => {});
   await box.fill(d.course || "");
   await box.press("Enter");
   log && log("info", "searched for the programme");
@@ -779,12 +809,25 @@ export async function step4(page, d, log){
     const both = page.locator("*").filter({ hasText: d.course }).filter({ hasText: d.university });
     row = await firstVisible(both.last());
   }
+  if(!(await hit.first().isVisible().catch(() => false))) throw new StepBlocked(STEP_NAMES[4], [], `AskUni's search didn't show "${d.course}"` + (d.university ? ` at ${d.university}` : "") + ".");
   await (row ? row.getByText(d.course, { exact: false }).first() : hit.first()).click({ timeout: 15000 });
-  await page.getByRole("button", { name: /\b(20\d{2})\s+(FALL|SPRING|SUMMER|WINTER)\b/i }).first().click({ timeout: 15000 });
+  log && log("info", "chose the programme");
+  await page.waitForTimeout(1500);
+  const season = page.getByRole("button", { name: /\b(20\d{2})\s+(FALL|SPRING|SUMMER|WINTER)\b/i }).first();
+  if(!(await season.waitFor({ timeout: 15000 }).then(() => true).catch(() => false))){
+    log && log("info", "after choosing the programme AskUni offers: " + await buttonsShown(page));
+    throw new StepBlocked(STEP_NAMES[4], [], "AskUni didn't show an intake (like 2026 FALL) to choose.");
+  }
+  log && log("info", "intake: " + (await season.innerText().catch(() => "")).replace(/\s+/g, " "));
+  await season.click({ timeout: 15000 });
   const dialog = page.getByRole("dialog", { name: /are you sure/i });
-  await dialog.waitFor({ timeout: 15000 });
+  if(!(await dialog.waitFor({ timeout: 15000 }).then(() => true).catch(() => false))){
+    log && log("info", "after choosing the intake AskUni offers: " + await buttonsShown(page));
+    throw new StepBlocked(STEP_NAMES[4], [], "AskUni didn't ask to confirm the application.");
+  }
   await dialog.getByRole("button", { name: /^\s*apply\s*$/i }).click();
-  await page.getByText(/Application submit/i).waitFor({ timeout: 20000 });
+  if(!(await page.getByText(/Application submit/i).waitFor({ timeout: 20000 }).then(() => true).catch(() => false)))
+    throw new StepBlocked(STEP_NAMES[4], [], "Apply was pressed but AskUni didn't confirm it. Check the student's applications on AskUni before sending again.");
   log && log("info", "AskUni accepted the application");
   // the application is in; closing the window afterwards must not turn this into a failure
   await page.getByRole("button", { name: /^\s*finish\s*$/i }).click({ timeout: 15000 }).catch(() => {});
@@ -934,8 +977,9 @@ export async function existingStudent(page, portalUrl, id, d, log, onStep){
   await add.waitFor({ timeout: 20000 }).catch(() => {});
   if(!(await add.isVisible().catch(() => false))) throw new StepBlocked(STEP_NAMES[4], [], "The ADD APPLICATION button isn't on the student's page.");
   await add.click();
-  const search = page.getByPlaceholder(/Type Interested Program/i).first();
-  if(!(await search.waitFor({ timeout: 20000 }).then(() => true).catch(() => false))){
+  let search = null;
+  for(let i = 0; i < 20 && !search; i++){ search = await programSearch(page); if(!search) await page.waitForTimeout(1000); }
+  if(!search){
     const said = await whatPageSays(page);
     log && log("info", `ADD APPLICATION opened: ${said.dialog || said.alerts.join(" | ")}`);
     throw new StepBlocked(STEP_NAMES[4], [], "ADD APPLICATION opened a window the bot doesn't know yet.");
