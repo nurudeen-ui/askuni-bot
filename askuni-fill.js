@@ -761,6 +761,7 @@ export async function step3(page, d, log){
     return r;
   };
   await doc(["Passport", "Passport Copy", "Passport Scan"], /passport/i, d.files.passport, 0);
+  if(d.files.diplomaFromTranscript) log && log("info", "Diploma: the student has no diploma in Orbuni, sending the transcript instead");
   await doc(["Diploma", "High School Diploma", "Diploma Certificate"], /diploma|certificate/i, d.files.diploma, 1);
   await doc(["Transcript", "Transcripts", "Academic Transcript"], /transcript/i, d.files.transcript, 2);
   await nextStep(page, 3, log);
@@ -812,6 +813,7 @@ export async function runWizard(page, d, log, onStep){
 // into AskUni's own login form and never written to a log or the database.
 const CAPTCHA = 'iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="turnstile"], iframe[src*="challenges.cloudflare"], .g-recaptcha, .h-captcha, .cf-turnstile';
 export async function isLoggedIn(page, portalUrl){
+  if(await currentStep(page).catch(() => 0)) return true;   // the Add Student form is open, so we are logged in
   if(!/\/users\//.test(page.url())) await page.goto(portalUrl + "/users/student/list/", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
   // AskUni's pages send a signed-out visitor to /login/ a moment after loading, so
   // wait until the page settles either way before deciding.

@@ -179,6 +179,8 @@ async function prepare(row){
   const pass = pickDoc(row, ["passport"]); if(pass) files.passport = await downloadToTemp(pass.storage_path).catch(() => null);
   const dip = pickDoc(row, ["certificate", "diploma"]); if(dip) files.diploma = await downloadToTemp(dip.storage_path).catch(() => null);
   const tr = pickDoc(row, ["transcript"]); if(tr) files.transcript = await downloadToTemp(tr.storage_path).catch(() => null);
+  // AskUni requires a diploma; when the student has none yet, send the transcript in its place (Orbuni's rule)
+  if(!files.diploma && tr){ files.diploma = await downloadToTemp(tr.storage_path).catch(() => null); files.diplomaFromTranscript = !!files.diploma; }
   return {
     first_name: p.first_name, last_name: p.last_name, email: p.email, gender: (p.gender || "").toLowerCase() || null,
     phone: p.phone || p.whatsapp,
@@ -204,7 +206,9 @@ async function runJob(sessionId, subId, applicationId){
   let data = null;
   try{
     await track(subId, { status: "filling", message: "Logging in to AskUni…", missing: [], screenshot_url: null });
-    await ensureLogin(page, e.context, log);
+    // Carry on: if the Add Student form is still open we are logged in. Checking the login here
+    // used to open AskUni's login page and throw the half-filled form away.
+    if(!(await F.currentStep(page).catch(() => 0))) await ensureLogin(page, e.context, log);
     await track(subId, { message: "Filling in AskUni's form…" });
     const row = await loadApplication(applicationId);   // fresh every time, so fixes made in Orbuni are picked up
     if(!row) throw new Error("This application no longer exists in Orbuni.");
