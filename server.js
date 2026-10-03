@@ -90,6 +90,15 @@ async function closeSession(sessionId, why){
 // Only one browser fits in memory. A form that is only waiting for "Carry on"
 // gives way to a new send; one that is busy filling does not.
 async function makeRoom(){
+  // The 15-minute AskUni sync has its own browser. Two browsers don't fit in 512 MB (a send that
+  // started during a sync crashed the bot), so a send stops the sync — it only reads, and runs
+  // again at the next 15 minutes.
+  for(let i = 0; i < 20 && SCANNING && !SCAN_BROWSER; i++) await new Promise(r => setTimeout(r, 250));   // sync still starting its browser
+  if(SCANNING && SCAN_BROWSER){
+    console.log("[sync] stopped to make room for a student being sent");
+    await SCAN_BROWSER.close().catch(() => {});
+    for(let i = 0; i < 40 && SCANNING; i++) await new Promise(r => setTimeout(r, 250));
+  }
   for(const [id, e] of LIVE){
     if(e.busy) return false;
     await closeSession(id, "closed to make room for another student");
@@ -375,6 +384,7 @@ function mapStatus(s){
 // Apply or Delete, and it steps aside whenever a student is being sent.
 const SCAN_MINUTES = Number(env("SCAN_MINUTES", "15"));
 let SCANNING = false;
+let SCAN_BROWSER = null;
 // The page-recording scan (scan.js) opens 20+ AskUni pages in one go and needs more memory
 // than the 512 MB Render plan has. It ran again after every restart (the "last run" time was
 // only kept in memory), so the bot crashed, restarted and crashed again every ~9 minutes and
@@ -393,6 +403,7 @@ async function scanNow(){
   SCANNING = true; let browser = null;
   try{
     browser = await launch();
+    SCAN_BROWSER = browser;
     const { context, page } = await newPage(browser);
     await ensureLogin(page, context, () => {});
     const log = (lvl, t) => console.log("[sync] " + t);
@@ -406,6 +417,7 @@ async function scanNow(){
     return { error: String(e && e.message || e).split("\n")[0] };
   }finally{
     if(browser){ try{ await browser.close(); }catch(_){} }
+    SCAN_BROWSER = null;
     SCANNING = false;
   }
 }
