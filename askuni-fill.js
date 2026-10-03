@@ -421,9 +421,9 @@ export async function fillDate(page, label, iso, log){
   if(!iso) return { ok:false, reason:"no date in Orbuni" };
   const [y, m, d] = String(iso).slice(0, 10).split("-");
   const scope = await scopeOf(page);
-  let el = await firstVisible(scope.getByLabel(new RegExp("^\\s*" + esc(label) + "\\s*\\*?\\s*$", "i")));
-  if(!el){ const box = await fieldBox(scope, label); if(box) el = await firstVisible(box.locator("input:not([type=hidden]):not([type=file])")); }
+  const el = await locateText(page, label);   // same rule as text boxes: the box under the label wins
   if(!el){ log && log("warn", `${label}: date box not found`); return { ok:false, reason:"box not found" }; }
+  const fbox = await fieldBox(scope, label);
   const type = await el.getAttribute("type");
   if(type === "date"){ await el.fill(`${y}-${m}-${d}`); log && log("info", `${label}: filled`); return { ok:true }; }
   const ph = ((await el.getAttribute("placeholder")) || "").toUpperCase();
@@ -442,8 +442,17 @@ export async function fillDate(page, label, iso, log){
   // AskUni's date boxes say DD-MM-YYYY but read typed dates month first ("04-09-2000" showed as
   // "April 9, 2000"; "13-09-2029" became a wrong date). When the box shows a written-out date,
   // check it against the real one; if it is wrong, type the date month first.
+  // what the field really displays: the typed box, plus any other box or text in the same field
+  // (date pickers often show a written-out copy like "April 9, 2000" next to the hidden typed one)
+  const displayed = async () => {
+    const vals = [await el.inputValue().catch(() => "")];
+    if(fbox) vals.push(...(await fbox.locator("input").evaluateAll(xs => xs.map(x => x.value)).catch(() => [])),
+                       (await fbox.innerText().catch(() => "")));
+    return vals.find(v => /[a-z]{3,}\.?\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[a-z]{3,}\.?\s+\d{4}/i.test(v)) || vals[0] || "";
+  };
   const shows = async () => {
-    const v = await el.inputValue().catch(() => "");
+    let v = await displayed();
+    const w = v.match(/[a-z]{3,}\.?\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[a-z]{3,}\.?\s+\d{4}/i); if(w) v = w[0];
     if(!/[a-z]/i.test(v)) return v.replace(/\D/g, "").length >= 8 ? "digits" : "empty";
     const t = new Date(v.replace(/(\d)(st|nd|rd|th)\b/gi, "$1"));
     if(isNaN(t)) return "digits";
@@ -462,6 +471,7 @@ export async function fillDate(page, label, iso, log){
     r = await shows();
   }
   const ok = r === "right" || r === "digits";
+  log && log("info", `${label}: the box shows "${String(await displayed()).replace(/\s+/g, " ").slice(0, 60)}"`);
   log && log(ok ? "info" : "warn", `${label}: ${ok ? "filled" + (r === "right" ? " and checked" : " as " + (ph || "DD/MM/YYYY")) : r === "wrong" ? "AskUni shows a different date — please check it" : "typed, but the box didn't take it"}`);
   return { ok };
 }
