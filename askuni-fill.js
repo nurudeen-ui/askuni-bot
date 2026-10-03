@@ -431,25 +431,38 @@ export async function fillDate(page, label, iso, log){
   if(/^Y/.test(ph)) out = `${y}${ph.includes(".") ? "." : ph.includes("/") ? "/" : "-"}${m}${ph.includes(".") ? "." : ph.includes("/") ? "/" : "-"}${d}`;
   else if(/^M/.test(ph)) out = `${m}/${d}/${y}`;
   else out = `${d}${ph.includes(".") ? "." : ph.includes("-") ? "-" : "/"}${m}${ph.includes(".") ? "." : ph.includes("-") ? "-" : "/"}${y}`;
-  await el.click({ timeout: 8000 });
-  await el.press("Control+A").catch(() => {});
-  await el.press("Backspace").catch(() => {});
-  await el.pressSequentially(out, { delay: 30 });
-  await el.press("Tab").catch(() => {});
-  let v = await el.inputValue().catch(() => "");
-  let ok = v.replace(/\D/g, "").length >= 8;
-  if(!ok){
-    // Segmented date boxes (day / month / year) take plain digits, in the order they show.
-    const order = /^Y/.test(ph) ? `${y}${m}${d}` : /^M/.test(ph) ? `${m}${d}${y}` : `${d}${m}${y}`;
+  const sep = ph.includes(".") ? "." : ph.includes("/") ? "/" : "-";
+  const typeDate = async (txt, delay = 30) => {
     await el.click({ timeout: 8000 }).catch(() => {});
     await el.press("Control+A").catch(() => {});
     await el.press("Backspace").catch(() => {});
-    await el.pressSequentially(order, { delay: 40 });
+    await el.pressSequentially(txt, { delay });
     await el.press("Tab").catch(() => {});
-    v = await el.inputValue().catch(() => "");
-    ok = v.replace(/\D/g, "").length >= 8;
+  };
+  // AskUni's date boxes say DD-MM-YYYY but read typed dates month first ("04-09-2000" showed as
+  // "April 9, 2000"; "13-09-2029" became a wrong date). When the box shows a written-out date,
+  // check it against the real one; if it is wrong, type the date month first.
+  const shows = async () => {
+    const v = await el.inputValue().catch(() => "");
+    if(!/[a-z]/i.test(v)) return v.replace(/\D/g, "").length >= 8 ? "digits" : "empty";
+    const t = new Date(v.replace(/(\d)(st|nd|rd|th)\b/gi, "$1"));
+    if(isNaN(t)) return "digits";
+    return t.getFullYear() === +y && t.getMonth() + 1 === +m && t.getDate() === +d ? "right" : "wrong";
+  };
+  await typeDate(out);
+  let r = await shows();
+  if(r === "wrong" && !/^Y/.test(ph)){
+    await typeDate(`${m}${sep}${d}${sep}${y}`);
+    r = await shows();
+    log && log(r === "right" ? "info" : "warn", `${label}: AskUni read the date the wrong way round, typed it month first`);
   }
-  log && log(ok ? "info" : "warn", `${label}: ${ok ? "filled as " + (ph || "DD/MM/YYYY") : "typed, but the box didn't take it"}`);
+  if(r === "empty"){
+    // Segmented date boxes (day / month / year) take plain digits, in the order they show.
+    await typeDate(/^Y/.test(ph) ? `${y}${m}${d}` : /^M/.test(ph) ? `${m}${d}${y}` : `${d}${m}${y}`, 40);
+    r = await shows();
+  }
+  const ok = r === "right" || r === "digits";
+  log && log(ok ? "info" : "warn", `${label}: ${ok ? "filled" + (r === "right" ? " and checked" : " as " + (ph || "DD/MM/YYYY")) : r === "wrong" ? "AskUni shows a different date — please check it" : "typed, but the box didn't take it"}`);
   return { ok };
 }
 
