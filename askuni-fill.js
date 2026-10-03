@@ -786,8 +786,9 @@ export async function step4(page, d, log){
   await dialog.getByRole("button", { name: /^\s*apply\s*$/i }).click();
   await page.getByText(/Application submit/i).waitFor({ timeout: 20000 });
   log && log("info", "AskUni accepted the application");
-  await page.getByRole("button", { name: /^\s*finish\s*$/i }).click({ timeout: 15000 });
-  await page.waitForURL(/\/users\/student\/\d+\/applications\/?/, { timeout: 20000 });
+  // the application is in; closing the window afterwards must not turn this into a failure
+  await page.getByRole("button", { name: /^\s*finish\s*$/i }).click({ timeout: 15000 }).catch(() => {});
+  await page.waitForURL(/\/users\/student\/\d+\/applications\/?/, { timeout: 20000 }).catch(() => {});
   const m = page.url().match(/\/users\/student\/(\d+)\//);
   return { askuni_student_id: m ? m[1] : null };
 }
@@ -870,4 +871,75 @@ export async function login(page, portalUrl, email, password, log){
   const alert = await page.locator('[role="alert"], .MuiAlert-message, .alert-danger, p.Mui-error, .MuiFormHelperText-root.Mui-error').allTextContents().catch(() => []);
   const said = errors.map(e => e.message).concat(alert.map(a => a.trim()).filter(Boolean)).slice(0, 3).join("; ");
   throw new StepBlocked("login", errors, "AskUni didn't accept the login" + (said ? " (" + said + ")" : "") + ". Check ASKUNI_EMAIL and ASKUNI_PASSWORD in Render.");
+}
+
+// ------------------------------------------------------------ a student who is already on AskUni
+// AskUni creates the student when step 2 of Add Student passes, so a second send (or a student
+// added by hand before) gets "Email already exists". Then the bot works on the student's own page
+// (Users → Student → the student): Essential Documents tab for missing files, then the
+// applications page → ADD APPLICATION → the same programme search and Apply as step 4.
+export async function findStudent(page, portalUrl, email, log){
+  if(!email) return null;
+  await page.goto(portalUrl + "/users/student/list/", { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.locator('a[href*="/users/student/"]').first().waitFor({ timeout: 20000 }).catch(() => {});
+  const look = () => page.evaluate((em) => {
+    em = em.toLowerCase();
+    const hits = Array.from(document.querySelectorAll("a, span, p, div, td, h6"))
+      .filter(e => e.children.length === 0 && (e.textContent || "").trim().toLowerCase() === em);
+    for(const e of hits){
+      // climb to the row that holds exactly one student link
+      for(let r = e, i = 0; r && i < 10; r = r.parentElement, i++){
+        const ids = new Set(Array.from(r.querySelectorAll('a[href*="/users/student/"]'))
+          .map(a => ((a.getAttribute("href") || "").match(/\/users\/student\/(\d+)/) || [])[1]).filter(Boolean));
+        if(ids.size === 1) return Array.from(ids)[0];
+        if(ids.size > 1) break;
+      }
+    }
+    return null;
+  }, email).catch(() => null);
+  let id = await look();
+  if(!id){
+    // not on the first page: use the Email filter
+    try{
+      await page.getByText(/^\s*Filters\s*$/i).first().click({ timeout: 5000 });
+      const box = await firstVisible(page.getByLabel(/^\s*e-?mail\s*$/i));
+      if(box){ await box.fill(email); await box.press("Enter"); await page.waitForTimeout(3500); id = await look(); }
+    }catch(_){}
+  }
+  log && log("info", id ? `found this student on AskUni already (student #${id})` : "this student is not on AskUni yet");
+  return id;
+}
+export async function existingStudent(page, portalUrl, id, d, log, onStep){
+  onStep && await onStep(3, STEP_NAMES[3]);
+  await page.goto(`${portalUrl}/users/student/${id}/account/`, { waitUntil: "domcontentloaded", timeout: 30000 });
+  // Essential Documents is the third tab (person, info, essential documents, documents, applications, notes)
+  const tabs = page.getByRole("tab");
+  await tabs.first().waitFor({ timeout: 20000 }).catch(() => {});
+  if((await tabs.count()) >= 5){
+    await tabs.nth(2).click({ timeout: 10000 }).catch(() => {});
+    await page.getByText(/^\s*Essential Documents\s*$/i).first().waitFor({ timeout: 15000 }).catch(() => {});
+    for(const [label, file] of [["Passport", d.files.passport], ["Diploma", d.files.diploma], ["Transcript", d.files.transcript]]){
+      if(!file) continue;
+      // a file AskUni already has shows a download icon next to the paperclip; skip those
+      const box = await fieldBox(page.locator("body"), label);
+      const icons = box ? await box.locator("svg").count().catch(() => 0) : 0;
+      if(icons >= 2){ log && log("info", `${label}: already on AskUni`); continue; }
+      await uploadFile(page, label, file, log);
+      await page.waitForTimeout(1500);
+    }
+  }else log && log("warn", "the student's page tabs look different — skipped the documents");
+  onStep && await onStep(4, STEP_NAMES[4]);
+  await page.goto(`${portalUrl}/users/student/${id}/applications/`, { waitUntil: "domcontentloaded", timeout: 30000 });
+  const add = page.getByRole("button", { name: /add application/i }).first();
+  await add.waitFor({ timeout: 20000 }).catch(() => {});
+  if(!(await add.isVisible().catch(() => false))) throw new StepBlocked(STEP_NAMES[4], [], "The ADD APPLICATION button isn't on the student's page.");
+  await add.click();
+  const search = page.getByPlaceholder(/Type Interested Program/i).first();
+  if(!(await search.waitFor({ timeout: 20000 }).then(() => true).catch(() => false))){
+    const said = await whatPageSays(page);
+    log && log("info", `ADD APPLICATION opened: ${said.dialog || said.alerts.join(" | ")}`);
+    throw new StepBlocked(STEP_NAMES[4], [], "ADD APPLICATION opened a window the bot doesn't know yet.");
+  }
+  const out = await step4(page, d, log);
+  return { askuni_student_id: out.askuni_student_id || id };
 }

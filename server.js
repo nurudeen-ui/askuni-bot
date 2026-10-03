@@ -213,18 +213,31 @@ async function runJob(sessionId, subId, applicationId){
     const row = await loadApplication(applicationId);   // fresh every time, so fixes made in Orbuni are picked up
     if(!row) throw new Error("This application no longer exists in Orbuni.");
     data = await prepare(row);
-    if(!(await F.currentStep(page))) await F.openWizard(page, PORTAL, log);
-    let out;
-    try{
-      out = await F.runWizard(page, data, log, (n, name) => track(subId, { step: name, message: "On " + name + "…" }));
+    const onStep = (n, name) => track(subId, { step: name, message: "On " + name + "…" });
+    // A student who is already on AskUni (sent before, or added by hand) can't go through Add Student
+    // again ("Email already exists"): finish their application on their own AskUni page instead.
+    let out, existing = null;
+    if(!(await F.currentStep(page))){
+      existing = await F.findStudent(page, PORTAL, data.email, log).catch(() => null);
+      if(!existing) await F.openWizard(page, PORTAL, log);
+    }
+    if(existing) out = await F.existingStudent(page, PORTAL, existing, data, log, onStep);
+    else try{
+      out = await F.runWizard(page, data, log, onStep);
     }catch(err){
+      if(err instanceof F.StepBlocked && /email already exists/i.test(err.message)){
+        const id = await F.findStudent(page, PORTAL, data.email, log).catch(() => null);
+        if(!id) throw err;
+        out = await F.existingStudent(page, PORTAL, id, data, log, onStep);
+      }else{
       // AskUni signed us out halfway: log in again once and carry on from the start of the form
       if(!(err instanceof F.StepBlocked) || err.step !== "login") throw err;
       log("warn", "AskUni asked to log in again");
       SAVED_LOGIN = null;
       await ensureLogin(page, e.context, log);
       await F.openWizard(page, PORTAL, log);
-      out = await F.runWizard(page, data, log, (n, name) => track(subId, { step: name, message: "On " + name + "…" }));
+      out = await F.runWizard(page, data, log, onStep);
+      }
     }
     await sb.from("applications").update({
       status: "sent_to_university", submitted_at: new Date().toISOString(),
