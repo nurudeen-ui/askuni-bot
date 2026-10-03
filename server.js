@@ -375,7 +375,18 @@ function mapStatus(s){
 // Apply or Delete, and it steps aside whenever a student is being sent.
 const SCAN_MINUTES = Number(env("SCAN_MINUTES", "15"));
 let SCANNING = false;
-let LAST_DISCOVERY = 0;
+// The page-recording scan (scan.js) opens 20+ AskUni pages in one go and needs more memory
+// than the 512 MB Render plan has. It ran again after every restart (the "last run" time was
+// only kept in memory), so the bot crashed, restarted and crashed again every ~9 minutes and
+// "Send to AskUni" got 502 while it was down. It is now off unless DISCOVERY_SCAN=on, and its
+// last run is read back from askuni_scans so a restart doesn't repeat it.
+const DISCOVERY = env("DISCOVERY_SCAN", "off") === "on";
+let LAST_DISCOVERY = Date.now();
+if(DISCOVERY){
+  LAST_DISCOVERY = 0;
+  sb.from("askuni_scans").select("scanned_at").order("scanned_at", { ascending: false }).limit(1)
+    .then(({ data }) => { if(data && data[0]) LAST_DISCOVERY = Math.max(LAST_DISCOVERY, Date.parse(data[0].scanned_at) || 0); }, () => {});
+}
 async function scanNow(){
   if(SCANNING) return { skipped: "already reading AskUni" };
   if(LIVE.size) return { skipped: "a student is being sent" };
@@ -386,9 +397,9 @@ async function scanNow(){
     await ensureLogin(page, context, () => {});
     const log = (lvl, t) => console.log("[sync] " + t);
     const stats = await runSync(page, PORTAL, sb, log);
-    // the page-recording scan is only for discovery: once after start, then once a day
+    // the page-recording scan is only for discovery: at most once a day, and only if DISCOVERY_SCAN=on
     let n = 0;
-    if(Date.now() - LAST_DISCOVERY > 24 * 3600e3){ n = await runScan(page, PORTAL, sb, log); LAST_DISCOVERY = Date.now(); }
+    if(DISCOVERY && Date.now() - LAST_DISCOVERY > 24 * 3600e3){ LAST_DISCOVERY = Date.now(); n = await runScan(page, PORTAL, sb, log); }
     return { ok: true, sync: stats, pages: n };
   }catch(e){
     console.error("[scan] FAILED: " + String(e && e.message || e).split("\n")[0]);
