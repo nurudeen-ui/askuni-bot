@@ -458,12 +458,17 @@ export async function fillDate(page, label, iso, log){
     if(isNaN(t)) return "digits";
     return t.getFullYear() === +y && t.getMonth() + 1 === +m && t.getDate() === +d ? "right" : "wrong";
   };
-  await typeDate(out);
-  let r = await shows();
-  if(r === "wrong" && !/^Y/.test(ph)){
-    await typeDate(`${m}${sep}${d}${sep}${y}`);
+  // AskUni's date boxes say DD-MM-YYYY but read typed dates month first (04-09-2000 became
+  // "April 9, 2000"), and only redraw the date a moment after leaving the box. So for day-first
+  // boxes type month first, wait, check what the field shows, and fall back to day first.
+  const tries = /^Y/.test(ph) || /^M/.test(ph) ? [out] : [`${m}${sep}${d}${sep}${y}`, out];
+  let r = "empty";
+  for(const txt of tries){
+    await typeDate(txt);
+    await page.waitForTimeout(900);
     r = await shows();
-    log && log(r === "right" ? "info" : "warn", `${label}: AskUni read the date the wrong way round, typed it month first`);
+    if(r !== "wrong") break;
+    log && log("info", `${label}: AskUni showed a different date after typing ${txt}, trying the other order`);
   }
   if(r === "empty"){
     // Segmented date boxes (day / month / year) take plain digits, in the order they show.
